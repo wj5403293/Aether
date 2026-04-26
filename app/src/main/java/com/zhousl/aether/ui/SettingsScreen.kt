@@ -61,6 +61,7 @@ import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material.icons.rounded.WbSunny
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -101,14 +102,23 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.zhousl.aether.BuildConfig
 import com.zhousl.aether.R
+import com.zhousl.aether.data.AetherPrivacyPolicyUrl
+import com.zhousl.aether.data.AetherWebsiteUrl
 import com.zhousl.aether.data.AgentModeAuthorizationMethod
 import com.zhousl.aether.data.AgentModeDisplayState
+import com.zhousl.aether.data.AutomaticModelPurpose
 import com.zhousl.aether.data.AppLanguage
 import com.zhousl.aether.data.AppThemeMode
 import com.zhousl.aether.data.LlmProvider
 import com.zhousl.aether.data.LlmProviderConfig
+import com.zhousl.aether.data.ProviderModelOption
+import com.zhousl.aether.data.availableModelOptions
+import com.zhousl.aether.data.availableModels
+import com.zhousl.aether.data.enabledModels
+import com.zhousl.aether.data.findModelOption
 import com.zhousl.aether.data.normalizeLlmInactivityReconnectTimeoutSeconds
 import com.zhousl.aether.data.quickActionLabel
+import com.zhousl.aether.data.resolveAutomaticModelKey
 import com.zhousl.aether.termux.TermuxSetupState
 import com.zhousl.aether.ui.theme.AetherBackground
 import com.zhousl.aether.ui.theme.AetherOnSurface
@@ -121,14 +131,18 @@ import com.zhousl.aether.ui.theme.AetherSurfaceHigh
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Page enum — drives the local in-composable navigation
-// ──────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// Page enum - drives the local in-composable navigation
+// -----------------------------------------------------------------------------
 
 private enum class SettingsPage {
     Hub,
     General,
     Providers,
+    DefaultModels,
+    DefaultChatModel,
+    DefaultTitleModel,
+    DefaultNamingModel,
     AddProvider,
     EditProvider,
     Personalization,
@@ -158,16 +172,20 @@ private fun SettingsPage.depth(): Int = when (this) {
     SettingsPage.AgentMode,
     SettingsPage.Developer,
     SettingsPage.About -> 1
+    SettingsPage.DefaultModels,
     SettingsPage.AddProvider,
     SettingsPage.EditProvider,
     SettingsPage.AddSkill,
     SettingsPage.AddMcpServer,
     SettingsPage.EditMcpServer -> 2
+    SettingsPage.DefaultChatModel,
+    SettingsPage.DefaultTitleModel,
+    SettingsPage.DefaultNamingModel -> 3
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Animation constants
-// ──────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 private const val PageTransitionDuration = 320
 private val PageTransitionEasing = CubicBezierEasing(0.22f, 0.84f, 0.18f, 1f)
@@ -194,9 +212,9 @@ private fun settingsTopOverlayTailGradient(): Brush = Brush.verticalGradient(
     )
 )
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Root composable — drop-in replacement for the old SettingsScreen in AetherApp
-// ──────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// Root composable - drop-in replacement for the old SettingsScreen in AetherApp
+// -----------------------------------------------------------------------------
 
 @Composable
 fun SettingsScreen(
@@ -213,12 +231,16 @@ fun SettingsScreen(
     agentModeAuthorizationMethod: AgentModeAuthorizationMethod,
     language: AppLanguage,
     themeMode: AppThemeMode,
+    defaultChatModelKey: String,
+    defaultTitleModelKey: String,
+    defaultNamingModelKey: String,
     agentModeDisplayState: AgentModeDisplayState,
     providerConfigs: List<LlmProviderConfig>,
     termuxSetupState: TermuxSetupState,
     installedSkills: List<com.zhousl.aether.data.InstalledSkill>,
     mcpServers: List<com.zhousl.aether.data.McpServerConfig>,
     isFetchingModels: Boolean,
+    appUpdate: AppUpdateUiState,
     onSave: (
         LlmProvider,
         String,
@@ -233,12 +255,15 @@ fun SettingsScreen(
         AgentModeAuthorizationMethod,
         AppLanguage,
         AppThemeMode,
+        String,
+        String,
+        String,
     ) -> Unit,
     onUpdateLanguage: (AppLanguage) -> Unit,
     onUpdateThemeMode: (AppThemeMode) -> Unit,
     onUpsertProviderConfig: (LlmProviderConfig) -> Unit,
     onRemoveProviderConfig: (String) -> Unit,
-    onSetActiveProvider: (String) -> Unit,
+    onSetProviderEnabled: (String, Boolean) -> Unit,
     onFetchModels: (LlmProviderConfig, (List<String>) -> Unit) -> Unit,
     onImportSkillFolder: () -> Unit,
     onImportSkillZip: ((Boolean) -> Unit) -> Unit,
@@ -261,9 +286,14 @@ fun SettingsScreen(
     onReplayFollowUpOnboarding: () -> Unit,
     onStopAgentModeDisplay: () -> Unit,
     onRefreshAgentModeDisplays: () -> Unit,
+    onOpenWebsite: () -> Unit,
+    onOpenPrivacyPolicy: () -> Unit,
+    onCheckForUpdates: () -> Unit,
+    onForceUpdateCheckForTesting: () -> Unit,
+    onDownloadAndInstallUpdate: () -> Unit,
     onBack: () -> Unit,
 ) {
-    // Mutable field values — survive recomposition & config changes
+    // Mutable field values - survive recomposition & config changes
     var systemPromptValue by rememberSaveable(stateSaver = TextFieldValue.Saver) {
         mutableStateOf(TextFieldValue(systemPrompt))
     }
@@ -291,19 +321,23 @@ fun SettingsScreen(
     var themeModeValue by rememberSaveable {
         mutableStateOf(themeMode)
     }
+    var defaultChatModelKeyValue by rememberSaveable { mutableStateOf(defaultChatModelKey) }
+    var defaultTitleModelKeyValue by rememberSaveable { mutableStateOf(defaultTitleModelKey) }
+    var defaultNamingModelKeyValue by rememberSaveable { mutableStateOf(defaultNamingModelKey) }
     val strings = remember(languageValue) { aetherStringsFor(languageValue) }
+    val enabledModelOptions = remember(providerConfigs) { providerConfigs.availableModelOptions() }
 
     // Track which provider is being edited
     var editingProviderId by rememberSaveable { mutableStateOf<String?>(null) }
     var editingMcpServerId by rememberSaveable { mutableStateOf<String?>(null) }
 
     fun persistAndExit() {
-        val activeProvider = providerConfigs.firstOrNull { it.isActive }
+        val compatibilityOption = enabledModelOptions.firstOrNull()
         onSave(
-            activeProvider?.providerType ?: provider,
-            activeProvider?.apiKey ?: apiKey,
-            activeProvider?.baseUrl ?: baseUrl,
-            activeProvider?.modelId ?: modelId,
+            compatibilityOption?.providerType ?: provider,
+            compatibilityOption?.apiKey ?: apiKey,
+            compatibilityOption?.baseUrl ?: baseUrl,
+            compatibilityOption?.modelId ?: modelId,
             systemPromptValue.text,
             tavilyApiKeyValue.text,
             normalizeLlmInactivityReconnectTimeoutSeconds(
@@ -315,17 +349,20 @@ fun SettingsScreen(
             agentModeAuthorizationMethodValue,
             languageValue,
             themeModeValue,
+            defaultChatModelKeyValue,
+            defaultTitleModelKeyValue,
+            defaultNamingModelKeyValue,
         )
         onBack()
     }
 
     fun persistAndReplayOnboarding() {
-        val activeProvider = providerConfigs.firstOrNull { it.isActive }
+        val compatibilityOption = enabledModelOptions.firstOrNull()
         onSave(
-            activeProvider?.providerType ?: provider,
-            activeProvider?.apiKey ?: apiKey,
-            activeProvider?.baseUrl ?: baseUrl,
-            activeProvider?.modelId ?: modelId,
+            compatibilityOption?.providerType ?: provider,
+            compatibilityOption?.apiKey ?: apiKey,
+            compatibilityOption?.baseUrl ?: baseUrl,
+            compatibilityOption?.modelId ?: modelId,
             systemPromptValue.text,
             tavilyApiKeyValue.text,
             normalizeLlmInactivityReconnectTimeoutSeconds(
@@ -337,17 +374,20 @@ fun SettingsScreen(
             agentModeAuthorizationMethodValue,
             languageValue,
             themeModeValue,
+            defaultChatModelKeyValue,
+            defaultTitleModelKeyValue,
+            defaultNamingModelKeyValue,
         )
         onReplayOnboarding()
     }
 
     fun persistAndReplayFollowUpOnboarding() {
-        val activeProvider = providerConfigs.firstOrNull { it.isActive }
+        val compatibilityOption = enabledModelOptions.firstOrNull()
         onSave(
-            activeProvider?.providerType ?: provider,
-            activeProvider?.apiKey ?: apiKey,
-            activeProvider?.baseUrl ?: baseUrl,
-            activeProvider?.modelId ?: modelId,
+            compatibilityOption?.providerType ?: provider,
+            compatibilityOption?.apiKey ?: apiKey,
+            compatibilityOption?.baseUrl ?: baseUrl,
+            compatibilityOption?.modelId ?: modelId,
             systemPromptValue.text,
             tavilyApiKeyValue.text,
             normalizeLlmInactivityReconnectTimeoutSeconds(
@@ -359,6 +399,9 @@ fun SettingsScreen(
             agentModeAuthorizationMethodValue,
             languageValue,
             themeModeValue,
+            defaultChatModelKeyValue,
+            defaultTitleModelKeyValue,
+            defaultNamingModelKeyValue,
         )
         onReplayFollowUpOnboarding()
     }
@@ -369,6 +412,8 @@ fun SettingsScreen(
 
     // Determine parent page for back navigation
     fun parentPage(): SettingsPage = when (page) {
+        SettingsPage.DefaultModels -> SettingsPage.Providers
+        SettingsPage.DefaultChatModel, SettingsPage.DefaultTitleModel, SettingsPage.DefaultNamingModel -> SettingsPage.DefaultModels
         SettingsPage.AddProvider, SettingsPage.EditProvider -> SettingsPage.Providers
         SettingsPage.AddSkill -> SettingsPage.Skills
         SettingsPage.AddMcpServer, SettingsPage.EditMcpServer -> SettingsPage.McpServers
@@ -405,8 +450,14 @@ fun SettingsScreen(
                     language = languageValue,
                     themeMode = themeModeValue,
                 ),
-                activeProviderName = providerConfigs.firstOrNull { it.isActive }?.name
-                    ?: provider.displayName,
+                activeProviderName = providerConfigs.count { it.isEnabled }.let { enabledCount ->
+                    when {
+                        enabledCount > 1 -> tr(strings, "$enabledCount providers enabled", "已启用 $enabledCount 个 Provider")
+                        enabledCount == 1 -> providerConfigs.firstOrNull { it.isEnabled }?.name.orEmpty()
+                        enabledModelOptions.isNotEmpty() -> enabledModelOptions.first().fullLabel
+                        else -> provider.displayName
+                    }
+                },
                 systemPromptSnippet = systemPromptValue.text.take(60),
                 tavilyConfigured = tavilyApiKeyValue.text.isNotBlank(),
                 reliabilitySummary = buildString {
@@ -451,7 +502,8 @@ fun SettingsScreen(
 
             SettingsPage.Providers -> ProvidersListPage(
                 providerConfigs = providerConfigs,
-                onSetActive = onSetActiveProvider,
+                onSetProviderEnabled = onSetProviderEnabled,
+                onOpenDefaultModels = { currentPage = SettingsPage.DefaultModels.name },
                 onEdit = { id ->
                     editingProviderId = id
                     currentPage = SettingsPage.EditProvider.name
@@ -461,8 +513,64 @@ fun SettingsScreen(
                 onBack = { currentPage = SettingsPage.Hub.name },
             )
 
+            SettingsPage.DefaultModels -> DefaultModelsPage(
+                modelOptions = enabledModelOptions,
+                defaultChatModelKey = defaultChatModelKeyValue,
+                defaultTitleModelKey = defaultTitleModelKeyValue,
+                defaultNamingModelKey = defaultNamingModelKeyValue,
+                onOpenDefaultChatModel = { currentPage = SettingsPage.DefaultChatModel.name },
+                onOpenDefaultTitleModel = { currentPage = SettingsPage.DefaultTitleModel.name },
+                onOpenDefaultNamingModel = { currentPage = SettingsPage.DefaultNamingModel.name },
+                onBack = { currentPage = SettingsPage.Providers.name },
+            )
+
+            SettingsPage.DefaultChatModel -> ModelSelectionListPage(
+                title = tr(strings, "Default Chat Model", "默认聊天模型"),
+                subtitle = tr(strings, "Used for new chats and when a conversation has not selected a model yet.", "用于新建聊天，以及当前会话尚未单独选择模型时。"),
+                selectedKey = defaultChatModelKeyValue,
+                options = enabledModelOptions,
+                automaticLabel = enabledModelOptions.findModelOption(
+                    enabledModelOptions.resolveAutomaticModelKey(AutomaticModelPurpose.Chat)
+                )?.fullLabel?.let { tr(strings, "Automatic · $it", "自动选择 · $it") }
+                    ?: tr(strings, "Automatic", "自动选择"),
+                automaticSubtitle = tr(strings, "Prioritize the SOTA models", "优先选择前沿模型"),
+                onSelected = { defaultChatModelKeyValue = it },
+                onBack = { currentPage = SettingsPage.DefaultModels.name },
+            )
+
+            SettingsPage.DefaultTitleModel -> ModelSelectionListPage(
+                title = tr(strings, "Default Title Model", "默认标题模型"),
+                subtitle = tr(strings, "Used when Aether automatically generates conversation titles.", "用于 Aether 自动生成会话标题。"),
+                selectedKey = defaultTitleModelKeyValue,
+                options = enabledModelOptions,
+                automaticLabel = enabledModelOptions.findModelOption(
+                    enabledModelOptions.resolveAutomaticModelKey(AutomaticModelPurpose.Title)
+                        .ifBlank { enabledModelOptions.resolveAutomaticModelKey(AutomaticModelPurpose.Chat) }
+                )?.fullLabel?.let { tr(strings, "Automatic · $it", "自动选择 · $it") }
+                    ?: tr(strings, "Automatic", "自动选择"),
+                automaticSubtitle = tr(strings, "Prioritize the SOTA models", "优先选择前沿模型"),
+                onSelected = { defaultTitleModelKeyValue = it },
+                onBack = { currentPage = SettingsPage.DefaultModels.name },
+            )
+
+            SettingsPage.DefaultNamingModel -> ModelSelectionListPage(
+                title = tr(strings, "Default Naming Model", "默认命名模型"),
+                subtitle = tr(strings, "Used for automatic naming flows such as Agent Skills and MCP labels.", "用于 Agent Skills、MCP 等自动命名流程。"),
+                selectedKey = defaultNamingModelKeyValue,
+                options = enabledModelOptions,
+                automaticLabel = enabledModelOptions.findModelOption(
+                    enabledModelOptions.resolveAutomaticModelKey(AutomaticModelPurpose.Naming)
+                        .ifBlank { enabledModelOptions.resolveAutomaticModelKey(AutomaticModelPurpose.Chat) }
+                )?.fullLabel?.let { tr(strings, "Automatic · $it", "自动选择 · $it") }
+                    ?: tr(strings, "Automatic", "自动选择"),
+                automaticSubtitle = tr(strings, "Prioritize the SOTA models", "优先选择前沿模型"),
+                onSelected = { defaultNamingModelKeyValue = it },
+                onBack = { currentPage = SettingsPage.DefaultModels.name },
+            )
+
             SettingsPage.AddProvider -> ProviderEditPage(
                 existingConfig = null,
+                existingProviderIds = providerConfigs.map { it.providerId }.toSet(),
                 isFetchingModels = isFetchingModels,
                 onSave = { config ->
                     onUpsertProviderConfig(config)
@@ -476,6 +584,7 @@ fun SettingsScreen(
                 val configToEdit = providerConfigs.firstOrNull { it.id == editingProviderId }
                 ProviderEditPage(
                     existingConfig = configToEdit,
+                    existingProviderIds = providerConfigs.map { it.providerId }.toSet(),
                     isFetchingModels = isFetchingModels,
                     onSave = { config ->
                         onUpsertProviderConfig(config)
@@ -608,20 +717,26 @@ fun SettingsScreen(
                 onReplayFollowUpOnboarding = ::persistAndReplayFollowUpOnboarding,
                 onImportAppData = onImportAppData,
                 onExportAppData = onExportAppData,
+                onForceUpdateCheckForTesting = onForceUpdateCheckForTesting,
                 onBack = { currentPage = SettingsPage.Hub.name },
             )
 
             SettingsPage.About -> AboutPage(
                 title = strings.about,
+                appUpdate = appUpdate,
+                onOpenWebsite = onOpenWebsite,
+                onOpenPrivacyPolicy = onOpenPrivacyPolicy,
+                onCheckForUpdates = onCheckForUpdates,
+                onDownloadAndInstallUpdate = onDownloadAndInstallUpdate,
                 onBack = { currentPage = SettingsPage.Hub.name },
             )
         }
     }
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Hub
-// ──────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 @Composable
 private fun SettingsHub(
@@ -677,7 +792,7 @@ private fun SettingsHub(
 
                 Spacer(Modifier.height(16.dp))
 
-            // ── Configuration card ──
+            // Configuration card
             SettingsCardGroup {
                 SettingsNavRow(
                     icon = Icons.Rounded.Cloud,
@@ -714,7 +829,7 @@ private fun SettingsHub(
 
             Spacer(Modifier.height(16.dp))
 
-            // ── Extensions card ──
+            // Extensions card
             SettingsCardGroup {
                 SettingsNavRow(
                     icon = Icons.Rounded.Extension,
@@ -747,7 +862,7 @@ private fun SettingsHub(
 
             Spacer(Modifier.height(16.dp))
 
-            // ── About card ──
+            // About card
             SettingsCardGroup {
                 SettingsNavRow(
                     icon = Icons.Rounded.AutoAwesome,
@@ -788,9 +903,9 @@ private fun SettingsHub(
     }
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Providers List Page (Multi-Provider)
-// ──────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 @Composable
 private fun GeneralSettingsPage(
@@ -822,7 +937,7 @@ private fun GeneralSettingsPage(
                         subtitle = if (option == AppLanguage.English) {
                             "English interface"
                         } else {
-                            "简体中文界面"
+                            "Simplified Chinese interface"
                         },
                         selected = option == selectedLanguage,
                         onClick = { onLanguageSelected(option) },
@@ -894,7 +1009,7 @@ private fun GeneralSettingsPageV2(
                         subtitle = if (option == AppLanguage.English) {
                             "English interface"
                         } else {
-                            "简体中文界面"
+                            "Simplified Chinese interface"
                         },
                         selected = option == selectedLanguage,
                         onClick = { onLanguageSelected(option) },
@@ -938,7 +1053,8 @@ private fun GeneralSettingsPageV2(
 @Composable
 private fun ProvidersListPage(
     providerConfigs: List<LlmProviderConfig>,
-    onSetActive: (String) -> Unit,
+    onSetProviderEnabled: (String, Boolean) -> Unit,
+    onOpenDefaultModels: () -> Unit,
     onEdit: (String) -> Unit,
     onRemove: (String) -> Unit,
     onAddNew: () -> Unit,
@@ -966,13 +1082,13 @@ private fun ProvidersListPage(
                     )
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        tr(strings, "Add a provider to connect to an LLM API.", "添加一个提供方以连接 LLM API。"),
+                        tr(strings, "Add a provider to connect to an LLM API.", "Add a provider to connect to an LLM API."),
                         style = MaterialTheme.typography.bodyMedium,
                         color = AetherOnSurfaceVariant,
                     )
                     Spacer(Modifier.height(16.dp))
                     SettingsActionButton(
-                        label = tr(strings, "Add Provider", "添加提供方"),
+                        label = tr(strings, "Add Provider", "Add Provider"),
                         onClick = onAddNew,
                     )
                 }
@@ -981,12 +1097,89 @@ private fun ProvidersListPage(
             providerConfigs.forEach { config ->
                 ProviderCard(
                     config = config,
-                    onSetActive = { onSetActive(config.id) },
+                    onEnabledChange = { enabled -> onSetProviderEnabled(config.id, enabled) },
                     onEdit = { onEdit(config.id) },
                     onRemove = { onRemove(config.id) },
                 )
                 Spacer(Modifier.height(12.dp))
             }
+        }
+
+        Spacer(Modifier.height(8.dp))
+        SettingsCardGroup {
+            SettingsNavRow(
+                icon = Icons.Rounded.AutoAwesome,
+                title = tr(strings, "Default Models", "默认模型"),
+                subtitle = tr(strings, "Choose dedicated defaults for chat, titles, and naming.", "为聊天、标题和命名分别设置默认模型。"),
+                onClick = onOpenDefaultModels,
+            )
+        }
+    }
+}
+
+@Composable
+private fun DefaultModelsPage(
+    modelOptions: List<ProviderModelOption>,
+    defaultChatModelKey: String,
+    defaultTitleModelKey: String,
+    defaultNamingModelKey: String,
+    onOpenDefaultChatModel: () -> Unit,
+    onOpenDefaultTitleModel: () -> Unit,
+    onOpenDefaultNamingModel: () -> Unit,
+    onBack: () -> Unit,
+) {
+    val strings = rememberAetherStrings()
+    val automaticChatLabel = modelOptions.findModelOption(
+        modelOptions.resolveAutomaticModelKey(AutomaticModelPurpose.Chat)
+    )?.fullLabel
+    val automaticTitleLabel = modelOptions.findModelOption(
+        modelOptions.resolveAutomaticModelKey(AutomaticModelPurpose.Title)
+            .ifBlank { modelOptions.resolveAutomaticModelKey(AutomaticModelPurpose.Chat) }
+    )?.fullLabel
+    val automaticNamingLabel = modelOptions.findModelOption(
+        modelOptions.resolveAutomaticModelKey(AutomaticModelPurpose.Naming)
+            .ifBlank { modelOptions.resolveAutomaticModelKey(AutomaticModelPurpose.Chat) }
+    )?.fullLabel
+    SubPageScaffold(
+        title = tr(strings, "Default Models", "默认模型"),
+        onBack = onBack,
+    ) {
+        SettingsCardGroup {
+            SettingsNavRow(
+                icon = Icons.Rounded.AutoAwesome,
+                title = tr(strings, "Default Chat Model", "默认聊天模型"),
+                subtitle = if (defaultChatModelKey.isBlank()) {
+                    automaticChatLabel?.let { tr(strings, "Automatic · $it", "自动选择 · $it") }
+                        ?: tr(strings, "Automatic", "自动选择")
+                } else {
+                    modelOptions.findModelOption(defaultChatModelKey)?.fullLabel.orEmpty()
+                },
+                onClick = onOpenDefaultChatModel,
+            )
+            CardDivider()
+            SettingsNavRow(
+                icon = Icons.Rounded.Edit,
+                title = tr(strings, "Default Title Model", "默认标题模型"),
+                subtitle = if (defaultTitleModelKey.isBlank()) {
+                    automaticTitleLabel?.let { tr(strings, "Automatic · $it", "自动选择 · $it") }
+                        ?: tr(strings, "Automatic", "自动选择")
+                } else {
+                    modelOptions.findModelOption(defaultTitleModelKey)?.fullLabel.orEmpty()
+                },
+                onClick = onOpenDefaultTitleModel,
+            )
+            CardDivider()
+            SettingsNavRow(
+                icon = Icons.Rounded.Person,
+                title = tr(strings, "Default Naming Model", "默认命名模型"),
+                subtitle = if (defaultNamingModelKey.isBlank()) {
+                    automaticNamingLabel?.let { tr(strings, "Automatic · $it", "自动选择 · $it") }
+                        ?: tr(strings, "Automatic", "自动选择")
+                } else {
+                    modelOptions.findModelOption(defaultNamingModelKey)?.fullLabel.orEmpty()
+                },
+                onClick = onOpenDefaultNamingModel,
+            )
         }
     }
 }
@@ -994,43 +1187,26 @@ private fun ProvidersListPage(
 @Composable
 private fun ProviderCard(
     config: LlmProviderConfig,
-    onSetActive: () -> Unit,
+    onEnabledChange: (Boolean) -> Unit,
     onEdit: () -> Unit,
     onRemove: () -> Unit,
 ) {
     val strings = rememberAetherStrings()
+    val availableModels = config.availableModels()
+    val enabledModels = config.enabledModels()
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(16.dp))
             .background(AetherSurfaceHigh)
-            .clickable(onClick = onSetActive)
             .padding(16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // Active indicator
-        Box(
-            modifier = Modifier
-                .size(20.dp)
-                .clip(CircleShape)
-                .background(
-                    if (config.isActive) {
-                        AetherPrimary
-                    } else {
-                        AetherOnSurfaceVariant.copy(alpha = 0.22f)
-                    }
-                ),
-            contentAlignment = Alignment.Center,
-        ) {
-            if (config.isActive) {
-                Icon(
-                    Icons.Rounded.Check,
-                    contentDescription = tr(strings, "Active", "当前启用"),
-                    tint = Color.White,
-                    modifier = Modifier.size(14.dp),
-                )
-            }
-        }
+        Checkbox(
+            checked = config.isEnabled,
+            onCheckedChange = { enabled -> onEnabledChange(enabled) },
+        )
 
         Spacer(Modifier.width(14.dp))
 
@@ -1040,16 +1216,24 @@ private fun ProviderCard(
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
                 color = AetherOnSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
             Spacer(Modifier.height(2.dp))
             Text(
-                text = config.providerType.displayName,
+                text = "${config.providerType.displayName} · ${config.providerId}",
                 style = MaterialTheme.typography.bodySmall,
                 color = AetherOnSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
             Spacer(Modifier.height(2.dp))
             Text(
-                text = config.modelId,
+                text = tr(
+                    strings,
+                    "${enabledModels.size} of ${availableModels.size} models enabled",
+                    "已启用 ${enabledModels.size}/${availableModels.size} 个模型",
+                ),
                 style = MaterialTheme.typography.bodySmall,
                 color = AetherOnSurfaceVariant,
                 maxLines = 1,
@@ -1075,13 +1259,126 @@ private fun ProviderCard(
     }
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
+@Composable
+private fun ModelSelectionListPage(
+    title: String,
+    subtitle: String,
+    selectedKey: String,
+    options: List<ProviderModelOption>,
+    automaticLabel: String,
+    automaticSubtitle: String,
+    onSelected: (String) -> Unit,
+    onBack: () -> Unit,
+) {
+    val strings = rememberAetherStrings()
+    val selectedOption = options.findModelOption(selectedKey)
+
+    SubPageScaffold(
+        title = title,
+        onBack = onBack,
+    ) {
+        Text(
+            text = subtitle,
+            style = MaterialTheme.typography.bodyMedium,
+            color = AetherOnSurfaceVariant,
+        )
+        Spacer(Modifier.height(14.dp))
+
+        if (options.isEmpty()) {
+            SettingsCardGroup {
+                Column(
+                    modifier = Modifier.padding(horizontal = 18.dp, vertical = 18.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Text(
+                        text = tr(strings, "No enabled models available", "没有可用的已启用模型"),
+                        style = MaterialTheme.typography.titleMedium,
+                        color = AetherOnSurface,
+                    )
+                    Text(
+                        text = tr(strings, "Enable at least one provider model first, then return here to choose a default.", "请先启用至少一个 Provider 模型，然后再回来选择默认模型。"),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = AetherOnSurfaceVariant,
+                    )
+                }
+            }
+            return@SubPageScaffold
+        }
+
+        SettingsCardGroup {
+            ModelSelectionListRow(
+                title = automaticLabel,
+                subtitle = automaticSubtitle,
+                selected = selectedOption == null,
+                onClick = { onSelected("") },
+            )
+            options.forEach { option ->
+                CardDivider()
+                ModelSelectionListRow(
+                    title = option.fullLabel,
+                    subtitle = option.providerName,
+                    selected = option.key == selectedOption?.key,
+                    onClick = { onSelected(option.key) },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ModelSelectionListRow(
+    title: String,
+    subtitle: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(18.dp))
+            .background(if (selected) AetherBackground.copy(alpha = 0.9f) else Color.Transparent)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 18.dp, vertical = 18.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = AetherOnSurface,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodyMedium,
+                color = AetherOnSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Spacer(Modifier.width(14.dp))
+        Icon(
+            imageVector = Icons.Rounded.Check,
+            contentDescription = null,
+            tint = if (selected) AetherPrimary else Color.Transparent,
+            modifier = Modifier.size(22.dp),
+        )
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Provider Edit Page (Add/Edit)
-// ──────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 @Composable
 private fun ProviderEditPage(
     existingConfig: LlmProviderConfig?,
+    existingProviderIds: Set<String>,
     isFetchingModels: Boolean,
     onSave: (LlmProviderConfig) -> Unit,
     onFetchModels: (LlmProviderConfig, (List<String>) -> Unit) -> Unit,
@@ -1092,23 +1389,26 @@ private fun ProviderEditPage(
     val formState = rememberProviderFormState(existingConfig)
 
     SubPageScaffold(
-        title = if (isNew) tr(strings, "Add Provider", "添加提供方") else tr(strings, "Edit Provider", "编辑提供方"),
+        title = if (isNew) tr(strings, "Add Provider", "添加 Provider") else tr(strings, "Edit Provider", "编辑 Provider"),
         onBack = onBack,
         trailingIcon = Icons.Rounded.Check,
-        trailingEnabled = formState.isValid,
-        onTrailingAction = { onSave(formState.buildConfig()) },
+        trailingEnabled = formState.isValid(existingProviderIds),
+        onTrailingAction = {
+            onSave(formState.buildConfig())
+            onBack()
+        },
     ) {
         ProviderConfigurationForm(
             state = formState,
+            existingProviderIds = existingProviderIds,
             isFetchingModels = isFetchingModels,
             onFetchModels = onFetchModels,
         )
     }
 }
-
-// ──────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Personalization sub-page
-// ──────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 @Composable
 private fun PersonalizationPage(
@@ -1138,7 +1438,7 @@ private fun PersonalizationPage(
             text = tr(
                 strings,
                 "This is the system prompt Aether uses in every conversation. It doesn't affect tool capabilities.",
-                "这是 Aether 在每次对话中使用的系统提示词，不会改变工具能力。",
+                "This is the system prompt Aether uses in every conversation. It doesn't affect tool capabilities.",
             ),
             style = MaterialTheme.typography.bodySmall,
             color = AetherOnSurfaceVariant,
@@ -1147,9 +1447,9 @@ private fun PersonalizationPage(
     }
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Skills List Page (Refactored)
-// ──────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 @Composable
 private fun ReliabilityPage(
@@ -1183,15 +1483,15 @@ private fun ReliabilityPage(
                 verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
                 SettingsToggleRow(
-                    title = tr(strings, "Keep tasks running in background", "保持任务在后台运行"),
-                    subtitle = tr(strings, "Uses an Android foreground service so active chats can keep working after you leave Aether.", "通过 Android 前台服务让正在运行的对话在离开 Aether 后继续执行。"),
+                    title = tr(strings, "Keep tasks running in background", "Keep tasks running in background"),
+                    subtitle = tr(strings, "Uses an Android foreground service so active chats can keep working after you leave Aether.", "Uses an Android foreground service so active chats can keep working after you leave Aether."),
                     checked = keepTasksRunningInBackground,
                     onCheckedChange = onKeepTasksRunningInBackgroundChanged,
                 )
                 Spacer(Modifier.height(4.dp))
                 SettingsToggleRow(
                     title = tr(strings, "Notify when background tasks finish", "后台任务结束时通知"),
-                    subtitle = tr(strings, "Shows a completion alert when a run ends while Aether is not on screen.", "当 Aether 不在前台且一次运行结束时显示完成提醒。"),
+                    subtitle = tr(strings, "Shows a completion alert when a run ends while Aether is not on screen.", "Shows a completion alert when a run ends while Aether is not on screen."),
                     checked = notifyOnTaskCompletion,
                     onCheckedChange = onNotifyOnTaskCompletionChanged,
                 )
@@ -1226,7 +1526,7 @@ private fun ReliabilityPage(
 
         Spacer(Modifier.height(8.dp))
         Text(
-            text = tr(strings, "If a request produces no response activity at all for this many seconds, Aether cancels that attempt and reconnects with backoff. Range: 30-3600 seconds.", "如果一次请求在这么多秒内完全没有任何响应活动，Aether 会取消该尝试并按退避策略重新连接。范围：30-3600 秒。"),
+            text = tr(strings, "If a request produces no response activity at all for this many seconds, Aether cancels that attempt and reconnects with backoff. Range: 30-3600 seconds.", "If a request produces no response activity at all for this many seconds, Aether cancels that attempt and reconnects with backoff. Range: 30-3600 seconds."),
             style = MaterialTheme.typography.bodySmall,
             color = AetherOnSurfaceVariant,
             modifier = Modifier.padding(horizontal = 4.dp),
@@ -1258,7 +1558,7 @@ private fun WebToolsPage(
 
         Spacer(Modifier.height(8.dp))
         Text(
-            text = tr(strings, "fetch_web_url works without extra setup and converts pages to Markdown on-device. tavily_search uses this API key for public web search.", "fetch_web_url 无需额外设置即可使用，并会在设备上把网页转换为 Markdown。tavily_search 会使用这个密钥进行公网搜索。"),
+            text = tr(strings, "fetch_web_url works without extra setup and converts pages to Markdown on-device. tavily_search uses this API key for public web search.", "fetch_web_url works without extra setup and converts pages to Markdown on-device. tavily_search uses this API key for public web search."),
             style = MaterialTheme.typography.bodySmall,
             color = AetherOnSurfaceVariant,
             modifier = Modifier.padding(horizontal = 4.dp),
@@ -1283,7 +1583,7 @@ private fun SkillsListPage(
         onTrailingAction = onAddNew,
     ) {
         Text(
-            text = tr(strings, "Manage installed skills and keep only the bundles you want Aether to use in chat.", "管理已安装技能，只保留你希望 Aether 在聊天中使用的能力包。"),
+            text = tr(strings, "Manage installed skills and keep only the bundles you want Aether to use in chat.", "Manage installed skills and keep only the bundles you want Aether to use in chat."),
             style = MaterialTheme.typography.bodySmall,
             color = AetherOnSurfaceVariant,
             modifier = Modifier.padding(horizontal = 4.dp),
@@ -1300,19 +1600,19 @@ private fun SkillsListPage(
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     Text(
-                        tr(strings, "No skills installed", "未安装技能"),
+                        tr(strings, "No skills installed", "No skills installed"),
                         style = MaterialTheme.typography.titleMedium,
                         color = AetherOnSurface,
                     )
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        tr(strings, "Import skills from a folder, zip, or remote URL.", "可从文件夹、zip 包或远程 URL 导入技能。"),
+                        tr(strings, "Import skills from a folder, zip, or remote URL.", "Import skills from a folder, zip, or remote URL."),
                         style = MaterialTheme.typography.bodyMedium,
                         color = AetherOnSurfaceVariant,
                     )
                     Spacer(Modifier.height(16.dp))
                     SettingsActionButton(
-                        label = tr(strings, "Add Skill", "添加技能"),
+                        label = tr(strings, "Add Skill", "Add Skill"),
                         onClick = onAddNew,
                     )
                 }
@@ -1399,10 +1699,10 @@ private fun SkillCard(
             Spacer(Modifier.height(14.dp))
             Spacer(Modifier.height(14.dp))
             DetailLine(tr(strings, "Skill ID", "技能 ID"), skill.id)
-            DetailLine(tr(strings, "Files", "文件数"), "${skill.resourceEntries.size}")
-            DetailLine(tr(strings, "Allowed tools", "允许的工具"), skill.allowedTools.ifEmpty { listOf(tr(strings, "Any", "任意")) }.joinToString(", "))
+            DetailLine(tr(strings, "Files", "Files"), "${skill.resourceEntries.size}")
+            DetailLine(tr(strings, "Allowed tools", "Allowed tools"), skill.allowedTools.ifEmpty { listOf(tr(strings, "Any", "Any")) }.joinToString(", "))
             if (skill.compatibility.isNotBlank()) {
-                DetailLine(tr(strings, "Compatibility", "兼容性"), skill.compatibility)
+                DetailLine(tr(strings, "Compatibility", "Compatibility"), skill.compatibility)
             }
             if (skill.source.label.isNotBlank()) {
                 DetailLine(tr(strings, "Source", "来源"), skill.source.label)
@@ -1412,9 +1712,9 @@ private fun SkillCard(
     }
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Add Skill Page
-// ──────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 @Composable
 private fun AddSkillPage(
@@ -1432,14 +1732,14 @@ private fun AddSkillPage(
     val strings = rememberAetherStrings()
 
     val tabOptions = listOf(
-        tr(strings, "Folder", "文件夹"),
+        tr(strings, "Folder", "Folder"),
         "Zip",
         "URL",
     )
 
     SubPageScaffold(title = title, onBack = onBack) {
         Text(
-            text = tr(strings, "Import Agent Skills from a local folder, zip file, or remote URL.", "从本地文件夹、zip 文件或远程 URL 导入 Agent 技能。"),
+            text = tr(strings, "Import Agent Skills from a local folder, zip file, or remote URL.", "Import Agent Skills from a local folder, zip file, or remote URL."),
             style = MaterialTheme.typography.bodySmall,
             color = AetherOnSurfaceVariant,
             modifier = Modifier.padding(horizontal = 4.dp),
@@ -1492,7 +1792,7 @@ private fun AddSkillPage(
                         )
                         Spacer(Modifier.height(16.dp))
                         SettingsActionButton(
-                            label = tr(strings, "Choose Folder", "选择文件夹"),
+                            label = tr(strings, "Choose Folder", "Choose Folder"),
                             onClick = {
                                 onImportSkillFolder()
                                 // Will navigate back via callback on success
@@ -1546,7 +1846,7 @@ private fun AddSkillPage(
 
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    text = tr(strings, "GitHub repo/tree URLs and direct zip links are supported.", "支持 GitHub 仓库或目录链接，以及直接的 zip 下载链接。"),
+                    text = tr(strings, "GitHub repo/tree URLs and direct zip links are supported.", "GitHub repo/tree URLs and direct zip links are supported."),
                     style = MaterialTheme.typography.bodySmall,
                     color = AetherOnSurfaceVariant,
                     modifier = Modifier.padding(horizontal = 4.dp),
@@ -1589,9 +1889,9 @@ private fun AddSkillPage(
     }
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // MCP Servers List Page (Refactored)
-// ──────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 @Composable
 private fun McpServersListPage(
@@ -1611,7 +1911,7 @@ private fun McpServersListPage(
         onTrailingAction = onAddNew,
     ) {
         Text(
-            text = tr(strings, "Manage MCP servers, inspect each transport config, and keep only the connections you want active.", "管理 MCP 服务器，查看各自的传输配置，只保留你想启用的连接。"),
+            text = tr(strings, "Manage MCP servers, inspect each transport config, and keep only the connections you want active.", "Manage MCP servers, inspect each transport config, and keep only the connections you want active."),
             style = MaterialTheme.typography.bodySmall,
             color = AetherOnSurfaceVariant,
             modifier = Modifier.padding(horizontal = 4.dp),
@@ -1628,19 +1928,19 @@ private fun McpServersListPage(
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     Text(
-                        tr(strings, "No MCP servers", "没有 MCP 服务器"),
+                        tr(strings, "No MCP servers", "No MCP servers"),
                         style = MaterialTheme.typography.titleMedium,
                         color = AetherOnSurface,
                     )
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        tr(strings, "Add HTTP or stdio servers to extend capabilities.", "添加 HTTP 或 stdio 服务器以扩展能力。"),
+                        tr(strings, "Add HTTP or stdio servers to extend capabilities.", "Add HTTP or stdio servers to extend capabilities."),
                         style = MaterialTheme.typography.bodyMedium,
                         color = AetherOnSurfaceVariant,
                     )
                     Spacer(Modifier.height(16.dp))
                     SettingsActionButton(
-                        label = tr(strings, "Add Server", "添加服务器"),
+                        label = tr(strings, "Add Server", "Add Server"),
                         onClick = onAddNew,
                     )
                 }
@@ -1738,7 +2038,7 @@ private fun McpServerCard(
             when (val transport = server.transport) {
                 is com.zhousl.aether.data.McpTransportConfig.StreamableHttp -> {
                     DetailLine("URL", transport.url)
-                    DetailLine(tr(strings, "Headers", "请求头"), transport.headers.size.toString())
+                    DetailLine(tr(strings, "Headers", "Headers"), transport.headers.size.toString())
                 }
 
                 is com.zhousl.aether.data.McpTransportConfig.StdIo -> {
@@ -1755,9 +2055,9 @@ private fun McpServerCard(
     }
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Add MCP Server Page
-// ──────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 @Composable
 private fun AddMcpServerPage(
@@ -1815,9 +2115,9 @@ private fun AddMcpServerPage(
     SubPageScaffold(title = title, onBack = onBack) {
         Text(
             text = if (isEditing) {
-                tr(strings, "Update the transport config and quick action source for this MCP server.", "更新这个 MCP 服务器的传输配置和快捷操作来源。")
+                tr(strings, "Update the transport config and quick action source for this MCP server.", "Update the transport config and quick action source for this MCP server.")
             } else {
-                tr(strings, "Add an HTTP server for remote APIs or a stdio server for local Termux processes.", "添加用于远程 API 的 HTTP 服务器，或用于本地 Termux 进程的 stdio 服务器。")
+                tr(strings, "Add an HTTP server for remote APIs or a stdio server for local Termux processes.", "Add an HTTP server for remote APIs or a stdio server for local Termux processes.")
             },
             style = MaterialTheme.typography.bodySmall,
             color = AetherOnSurfaceVariant,
@@ -1851,22 +2151,22 @@ private fun AddMcpServerPage(
             0 -> {
                 // HTTP server
                 SettingsCardGroup {
-                    ChatGptTextField(tr(strings, "Server name", "服务器名称"), httpServerNameValue) { httpServerNameValue = it }
+                    ChatGptTextField(tr(strings, "Server name", "Server name"), httpServerNameValue) { httpServerNameValue = it }
                     CardDivider()
                     ChatGptTextField(tr(strings, "Server URL", "服务器 URL"), httpServerUrlValue) { httpServerUrlValue = it }
                     CardDivider()
-                    ChatGptTextField(tr(strings, "Headers", "请求头"), httpHeadersValue, minLines = 2) { httpHeadersValue = it }
+                    ChatGptTextField(tr(strings, "Headers", "Headers"), httpHeadersValue, minLines = 2) { httpHeadersValue = it }
                 }
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    tr(strings, "Optional headers, one KEY=VALUE per line.", "可选请求头，每行一个 KEY=VALUE。"),
+                    tr(strings, "Optional headers, one KEY=VALUE per line.", "Optional headers, one KEY=VALUE per line."),
                     style = MaterialTheme.typography.bodySmall,
                     color = AetherOnSurfaceVariant,
                     modifier = Modifier.padding(horizontal = 4.dp),
                 )
                 Spacer(Modifier.height(16.dp))
                 SettingsActionButton(
-                    label = if (isEditing) tr(strings, "Save HTTP Server", "保存 HTTP 服务器") else tr(strings, "Add HTTP Server", "添加 HTTP 服务器"),
+                    label = if (isEditing) tr(strings, "Save HTTP Server", "Save HTTP Server") else tr(strings, "Add HTTP Server", "Add HTTP Server"),
                     onClick = {
                         if (httpServerNameValue.text.isNotBlank() && httpServerUrlValue.text.isNotBlank()) {
                             onSaveHttpMcpServer(
@@ -1884,7 +2184,7 @@ private fun AddMcpServerPage(
             1 -> {
                 // Stdio server
                 SettingsCardGroup {
-                    ChatGptTextField(tr(strings, "Server name", "服务器名称"), stdioServerNameValue) { stdioServerNameValue = it }
+                    ChatGptTextField(tr(strings, "Server name", "Server name"), stdioServerNameValue) { stdioServerNameValue = it }
                     CardDivider()
                     ChatGptTextField(tr(strings, "Command", "命令"), stdioCommandValue, minLines = 2) { stdioCommandValue = it }
                     CardDivider()
@@ -1894,14 +2194,14 @@ private fun AddMcpServerPage(
                 }
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    tr(strings, "Optional environment variables, one KEY=VALUE per line.", "可选环境变量，每行一个 KEY=VALUE。"),
+                    tr(strings, "Optional environment variables, one KEY=VALUE per line.", "Optional environment variables, one KEY=VALUE per line."),
                     style = MaterialTheme.typography.bodySmall,
                     color = AetherOnSurfaceVariant,
                     modifier = Modifier.padding(horizontal = 4.dp),
                 )
                 Spacer(Modifier.height(16.dp))
                 SettingsActionButton(
-                    label = if (isEditing) tr(strings, "Save Stdio Server", "保存 Stdio 服务器") else tr(strings, "Add Stdio Server", "添加 Stdio 服务器"),
+                    label = if (isEditing) tr(strings, "Save Stdio Server", "Save Stdio Server") else tr(strings, "Add Stdio Server", "Add Stdio Server"),
                     onClick = {
                         if (stdioServerNameValue.text.isNotBlank() && stdioCommandValue.text.isNotBlank()) {
                             onSaveStdIoMcpServer(
@@ -1920,9 +2220,9 @@ private fun AddMcpServerPage(
     }
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Termux sub-page
-// ──────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 @Composable
 private fun TermuxSettingsPage(
@@ -1939,7 +2239,7 @@ private fun TermuxSettingsPage(
     val strings = rememberAetherStrings()
     SubPageScaffold(title = title, onBack = onBack) {
         Text(
-            text = tr(strings, "Aether runs bash through Termux. Finish setup here so tool calls work for every user without manual adb steps.", "Aether 通过 Termux 运行 bash。请在这里完成设置，让工具调用无需手动 adb 步骤即可正常工作。"),
+            text = tr(strings, "Aether runs bash through Termux. Finish setup here so tool calls work for every user without manual adb steps.", "Aether runs bash through Termux. Finish setup here so tool calls work for every user without manual adb steps."),
             style = MaterialTheme.typography.bodySmall,
             color = AetherOnSurfaceVariant,
             modifier = Modifier.padding(horizontal = 4.dp),
@@ -1950,17 +2250,17 @@ private fun TermuxSettingsPage(
         if (termuxSetupState.isReady) {
             SettingsCardGroup {
                 Column(modifier = Modifier.padding(16.dp)) {
-                    Text(tr(strings, "Termux is connected", "Termux 已连接"), style = MaterialTheme.typography.labelLarge, color = AetherOnSurface)
+                    Text(tr(strings, "Termux is connected", "Termux is connected"), style = MaterialTheme.typography.labelLarge, color = AetherOnSurface)
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        tr(strings, "Permission is granted and the setup probe succeeded.", "权限已授予，且设置检测已成功。"),
+                        tr(strings, "Permission is granted and the setup probe succeeded.", "Permission is granted and the setup probe succeeded."),
                         style = MaterialTheme.typography.bodySmall,
                         color = AetherOnSurfaceVariant,
                     )
                 }
             }
             Spacer(Modifier.height(12.dp))
-            SettingsActionButton(label = tr(strings, "Refresh status", "刷新状态"), onClick = onRefreshTermuxSetup, modifier = Modifier.fillMaxWidth())
+            SettingsActionButton(label = tr(strings, "Refresh status", "Refresh status"), onClick = onRefreshTermuxSetup, modifier = Modifier.fillMaxWidth())
         } else {
             TermuxSetupNotice(
                 setupState = termuxSetupState,
@@ -1990,7 +2290,7 @@ private fun AgentModeSettingsPage(
     val strings = rememberAetherStrings()
     SubPageScaffold(title = title, onBack = onBack) {
         Text(
-            text = tr(strings, "Authorize isolated virtual-display tools with Shizuku or Root. Skip this on devices without either option.", "通过 Shizuku 或 Root 为隔离虚拟显示工具授权。没有这些条件的设备可以先跳过。"),
+            text = tr(strings, "Authorize isolated virtual-display tools with Shizuku or Root. Skip this on devices without either option.", "Authorize isolated virtual-display tools with Shizuku or Root. Skip this on devices without either option."),
             style = MaterialTheme.typography.bodySmall,
             color = AetherOnSurfaceVariant,
             modifier = Modifier.padding(horizontal = 4.dp),
@@ -2002,7 +2302,7 @@ private fun AgentModeSettingsPage(
             Column(modifier = Modifier.padding(16.dp)) {
                 SettingsToggleRow(
                     title = tr(strings, "Agent Mode authorization", "Agent 模式授权"),
-                    subtitle = tr(strings, "Enables isolated virtual-display tools. Requires Shizuku or Root.", "启用隔离虚拟显示工具。需要 Shizuku 或 Root。"),
+                    subtitle = tr(strings, "Enables isolated virtual-display tools. Requires Shizuku or Root.", "Enables isolated virtual-display tools. Requires Shizuku or Root."),
                     checked = agentModeAuthorizationEnabled,
                     onCheckedChange = onAgentModeAuthorizationEnabledChanged,
                 )
@@ -2018,8 +2318,8 @@ private fun AgentModeSettingsPage(
                         SettingsChoiceRow(
                             title = method.displayName,
                             subtitle = when (method) {
-                                AgentModeAuthorizationMethod.Shizuku -> tr(strings, "Uses an elevated Shizuku service.", "使用提权后的 Shizuku 服务。")
-                                AgentModeAuthorizationMethod.Root -> tr(strings, "Uses root shell for privileged input.", "使用 root shell 进行特权输入。")
+                                AgentModeAuthorizationMethod.Shizuku -> tr(strings, "Uses an elevated Shizuku service.", "Uses an elevated Shizuku service.")
+                                AgentModeAuthorizationMethod.Root -> tr(strings, "Uses root shell for privileged input.", "Uses root shell for privileged input.")
                             },
                             selected = agentModeAuthorizationMethod == method,
                             onClick = { onAgentModeAuthorizationMethodChanged(method) },
@@ -2028,7 +2328,7 @@ private fun AgentModeSettingsPage(
                 }
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    text = tr(strings, "Shizuku mode creates the display from a Shizuku user service so apps can render off the main screen. Root mode remains experimental.", "Shizuku 模式会通过用户服务创建显示，让应用在主屏幕之外渲染。Root 模式仍属实验特性。"),
+                    text = tr(strings, "Shizuku mode creates the display from a Shizuku user service so apps can render off the main screen. Root mode remains experimental.", "Shizuku mode creates the display from a Shizuku user service so apps can render off the main screen. Root mode remains experimental."),
                     style = MaterialTheme.typography.bodySmall,
                     color = AetherOnSurfaceVariant,
                 )
@@ -2047,9 +2347,9 @@ private fun AgentModeSettingsPage(
                 Spacer(Modifier.height(6.dp))
                 Text(
                     text = if (agentModeDisplayState.isActive) {
-                        tr(strings, "Display ${agentModeDisplayState.displayId ?: "-"} is active at ${agentModeDisplayState.width} x ${agentModeDisplayState.height}.", "显示 ${agentModeDisplayState.displayId ?: "-"} 正在运行，分辨率为 ${agentModeDisplayState.width} x ${agentModeDisplayState.height}。")
+                        tr(strings, "Display ${agentModeDisplayState.displayId ?: "-"} is active at ${agentModeDisplayState.width} x ${agentModeDisplayState.height}.", "Display ${agentModeDisplayState.displayId ?: "-"} is active at ${agentModeDisplayState.width} x ${agentModeDisplayState.height}.")
                     } else {
-                        tr(strings, "No Agent Mode virtual display is active.", "当前没有活动的 Agent 模式虚拟显示。")
+                        tr(strings, "No Agent Mode virtual display is active.", "No Agent Mode virtual display is active.")
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = AetherOnSurfaceVariant,
@@ -2073,7 +2373,7 @@ private fun AgentModeSettingsPage(
                 Spacer(Modifier.height(8.dp))
                 if (agentModeDisplayState.displays.isEmpty()) {
                     Text(
-                        text = tr(strings, "No displays are currently visible to Aether.", "当前没有 Aether 可见的显示。"),
+                        text = tr(strings, "No displays are currently visible to Aether.", "No displays are currently visible to Aether."),
                         style = MaterialTheme.typography.bodySmall,
                         color = AetherOnSurfaceVariant,
                     )
@@ -2102,7 +2402,7 @@ private fun AgentModeSettingsPage(
                                     )
                                     Text(
                                         text = listOf(
-                                            display.name.ifBlank { tr(strings, "Unnamed", "未命名") },
+                                            display.name.ifBlank { tr(strings, "Unnamed", "Unnamed") },
                                             "${display.width} x ${display.height}",
                                             if (display.isAetherDisplay) "Aether" else "",
                                         ).filter { it.isNotBlank() }.joinToString(" · "),
@@ -2140,12 +2440,13 @@ private fun DeveloperSettingsPage(
     onReplayFollowUpOnboarding: () -> Unit,
     onImportAppData: () -> Unit,
     onExportAppData: () -> Unit,
+    onForceUpdateCheckForTesting: () -> Unit,
     onBack: () -> Unit,
 ) {
     val strings = rememberAetherStrings()
     SubPageScaffold(title = title, onBack = onBack) {
         Text(
-            text = tr(strings, "Developer-only tools and replay controls.", "仅面向开发者的工具与引导回放控制。"),
+            text = tr(strings, "Developer-only tools and replay controls.", "Developer-only tools and replay controls."),
             style = MaterialTheme.typography.bodySmall,
             color = AetherOnSurfaceVariant,
             modifier = Modifier.padding(horizontal = 4.dp),
@@ -2162,7 +2463,7 @@ private fun DeveloperSettingsPage(
                 )
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    text = tr(strings, "Import or export the complete local Aether data set as JSON.", "以 JSON 形式导入或导出完整的本地 Aether 数据。"),
+                    text = tr(strings, "Import or export the complete local Aether data set as JSON.", "Import or export the complete local Aether data set as JSON."),
                     style = MaterialTheme.typography.bodySmall,
                     color = AetherOnSurfaceVariant,
                 )
@@ -2186,13 +2487,41 @@ private fun DeveloperSettingsPage(
         SettingsCardGroup {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text(
+                    text = tr(strings, "Update testing", "Update testing"),
+                    style = MaterialTheme.typography.labelLarge,
+                    color = AetherOnSurface,
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = tr(
+                        strings,
+                        "Fetch the latest GitHub Release and show the update prompt even when the installed version is current.",
+                        "Fetch the latest GitHub Release and show the update prompt even when the installed version is current.",
+                    ),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = AetherOnSurfaceVariant,
+                )
+                Spacer(Modifier.height(16.dp))
+                SettingsActionButton(
+                    label = tr(strings, "Force update prompt", "Force update prompt"),
+                    onClick = onForceUpdateCheckForTesting,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
+
+        Spacer(Modifier.height(14.dp))
+
+        SettingsCardGroup {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
                     text = tr(strings, "Replay Follow-up Tour", "重播后续引导"),
                     style = MaterialTheme.typography.labelLarge,
                     color = AetherOnSurface,
                 )
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    text = tr(strings, "Starts from Termux, then goes through Agent Mode, Tavily, Skills, and MCP.", "从 Termux 开始，随后依次经过 Agent 模式、Tavily、技能和 MCP。"),
+                    text = tr(strings, "Starts from Termux, then goes through Agent Mode, Tavily, Skills, and MCP.", "Starts from Termux, then goes through Agent Mode, Tavily, Skills, and MCP."),
                     style = MaterialTheme.typography.bodySmall,
                     color = AetherOnSurfaceVariant,
                 )
@@ -2207,18 +2536,35 @@ private fun DeveloperSettingsPage(
     }
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-//  Shared building blocks
-// ══════════════════════════════════════════════════════════════════════════════
+// -----------------------------------------------------------------------------
+// Shared building blocks
+// -----------------------------------------------------------------------------
 
-// ── Sub-page scaffold ────────────────────────────────────────────────────────
+// Sub-page scaffold
 
 @Composable
 private fun AboutPage(
     title: String,
+    appUpdate: AppUpdateUiState,
+    onOpenWebsite: () -> Unit,
+    onOpenPrivacyPolicy: () -> Unit,
+    onCheckForUpdates: () -> Unit,
+    onDownloadAndInstallUpdate: () -> Unit,
     onBack: () -> Unit,
 ) {
     val strings = rememberAetherStrings()
+    val updateSubtitle = when {
+        appUpdate.isDownloading -> appUpdate.downloadProgress?.let { progress ->
+            tr(strings, "Downloading ${(progress * 100).toInt()}%", "Downloading ${(progress * 100).toInt()}%")
+        } ?: tr(strings, "Downloading update", "Downloading update")
+        appUpdate.isChecking -> tr(strings, "Checking GitHub Releases", "Checking GitHub Releases")
+        appUpdate.availableRelease != null -> tr(
+            strings,
+            "Aether ${appUpdate.availableRelease.versionName} is available",
+            "Aether ${appUpdate.availableRelease.versionName} is available",
+        )
+        else -> tr(strings, "Check GitHub Releases for a newer APK", "Check GitHub Releases for a newer APK")
+    }
     val releaseLabel = tr(strings, "Release ${BuildConfig.VERSION_NAME}", "版本 ${BuildConfig.VERSION_NAME}")
     SubPageScaffold(title = title, onBack = onBack) {
         Column(
@@ -2249,11 +2595,44 @@ private fun AboutPage(
         Spacer(Modifier.height(24.dp))
 
         SettingsCardGroup {
-            AboutInfoRow(label = tr(strings, "Author", "作者"), value = "Zhou-Shilin")
+            AboutInfoRow(label = tr(strings, "Author", "Author"), value = "Zhou-Shilin")
             CardDivider()
             AboutInfoRow(label = tr(strings, "Version", "版本"), value = releaseLabel)
             CardDivider()
-            AboutInfoRow(label = tr(strings, "Website", "网站"), value = "github.com/Zhou-Shilin")
+            SettingsNavRow(
+                icon = Icons.Rounded.Refresh,
+                title = tr(strings, "Check for updates", "Check for updates"),
+                subtitle = updateSubtitle,
+                onClick = onCheckForUpdates,
+            )
+            CardDivider()
+            SettingsNavRow(
+                icon = Icons.Rounded.Link,
+                title = tr(strings, "Website", "网站"),
+                subtitle = AetherWebsiteUrl.removePrefix("https://"),
+                onClick = onOpenWebsite,
+            )
+            CardDivider()
+            SettingsNavRow(
+                icon = Icons.Rounded.Link,
+                title = tr(strings, "Privacy Policy", "隐私政策"),
+                subtitle = AetherPrivacyPolicyUrl.removePrefix("https://"),
+                onClick = onOpenPrivacyPolicy,
+            )
+        }
+
+        if (appUpdate.availableRelease != null) {
+            Spacer(Modifier.height(16.dp))
+            SettingsActionButton(
+                label = if (appUpdate.isDownloading) {
+                    updateSubtitle
+                } else {
+                    tr(strings, "Download and install", "Download and install")
+                },
+                onClick = onDownloadAndInstallUpdate,
+                enabled = !appUpdate.isDownloading,
+                modifier = Modifier.fillMaxWidth(),
+            )
         }
     }
 }
@@ -2338,7 +2717,7 @@ private fun SubPageScaffold(
     }
 }
 
-// ── Top bar ──────────────────────────────────────────────────────────────────
+// Top bar
 
 @Composable
 private fun SettingsTopBarOverlay(
@@ -2439,7 +2818,7 @@ private fun SettingsCircleButton(
     }
 }
 
-// ── Card group (soft-fill container) ─────────────────────────────────────────
+// Card group (soft-fill container)
 
 @Composable
 private fun SettingsCardGroup(
@@ -2460,7 +2839,7 @@ private fun CardDivider() {
     Spacer(Modifier.height(4.dp))
 }
 
-// ── Navigation row (hub item) ────────────────────────────────────────────────
+// Navigation row (hub item)
 
 @OptIn(ExperimentalFoundationApi::class)
 private fun Modifier.settingsBringIntoViewOnFocus(): Modifier = composed {
@@ -2526,7 +2905,7 @@ private fun SettingsNavRow(
     }
 }
 
-// ── ChatGPT-style inline text field (inside a card) ──────────────────────────
+// ChatGPT-style inline text field (inside a card)
 
 @Composable
 private fun ChatGptTextField(
@@ -2573,7 +2952,7 @@ private fun ChatGptTextField(
     }
 }
 
-// ── ChatGPT-style dropdown field (inside a card) ─────────────────────────────
+// ChatGPT-style dropdown field (inside a card)
 
 @Composable
 private fun ChatGptDropdownField(
@@ -2637,7 +3016,7 @@ private fun ChatGptDropdownField(
     }
 }
 
-// ── Action button ────────────────────────────────────────────────────────────
+// Action button
 
 @Composable
 private fun SelectionDropdownField(
@@ -2787,7 +3166,7 @@ private fun SettingsActionButton(
     }
 }
 
-// ── Small chip button (skill / server actions) ───────────────────────────────
+// Small chip button (skill / server actions)
 
 @Composable
 private fun SmallChipButton(

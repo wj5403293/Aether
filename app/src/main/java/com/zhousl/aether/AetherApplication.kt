@@ -5,10 +5,11 @@ import android.content.Context
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
+import com.posthog.android.PostHogAndroid
+import com.posthog.android.PostHogAndroidConfig
 import com.zhousl.aether.data.AgentExtensionsRepository
 import com.zhousl.aether.data.AgentModeController
 import com.zhousl.aether.data.AgentSkillManager
-import com.zhousl.aether.data.AppSettings
 import com.zhousl.aether.data.ChatRepository
 import com.zhousl.aether.data.ChatStateStore
 import com.zhousl.aether.data.SessionExecutionManager
@@ -22,20 +23,37 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 
 class AetherApplication : Application() {
     val runtime: AetherAppRuntime by lazy(LazyThreadSafetyMode.NONE) {
         AetherAppRuntime(this)
     }
+    @Volatile
+    private var isPostHogInitialized = false
 
     override fun onCreate() {
         super.onCreate()
         runtime.initialize()
     }
+
+    fun initializePostHog() {
+        if (isPostHogInitialized || BuildConfig.POSTHOG_API_KEY.isBlank()) return
+        synchronized(this) {
+            if (isPostHogInitialized || BuildConfig.POSTHOG_API_KEY.isBlank()) return
+            val config = PostHogAndroidConfig(
+                apiKey = BuildConfig.POSTHOG_API_KEY,
+                host = BuildConfig.POSTHOG_HOST,
+            )
+            PostHogAndroid.setup(this, config)
+            isPostHogInitialized = true
+        }
+    }
 }
 
 class AetherAppRuntime(
-    private val application: Application,
+    private val application: AetherApplication,
 ) {
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -81,6 +99,15 @@ class AetherAppRuntime(
     fun initialize() {
         notificationController.ensureChannels()
         ProcessLifecycleOwner.get().lifecycle.addObserver(appForegroundTracker)
+        appScope.launch {
+            if (settingsRepository.settings.first().privacyPolicyAccepted) {
+                initializePostHog()
+            }
+        }
+    }
+
+    fun initializePostHog() {
+        application.initializePostHog()
     }
 }
 

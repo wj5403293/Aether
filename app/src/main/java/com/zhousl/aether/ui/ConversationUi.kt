@@ -56,8 +56,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.ArrowDropDown
 import androidx.compose.material.icons.rounded.ArrowUpward
 import androidx.compose.material.icons.rounded.AttachFile
 import androidx.compose.material.icons.rounded.AutoAwesome
@@ -106,6 +108,9 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -113,6 +118,7 @@ import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.LineHeightStyle
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.IntOffset
@@ -127,6 +133,7 @@ import com.zhousl.aether.data.AgentModeDisplayState
 import com.zhousl.aether.data.McpServerConfig
 import com.zhousl.aether.data.McpTransportConfig
 import com.zhousl.aether.data.PendingSessionInput
+import com.zhousl.aether.data.ProviderModelOption
 import com.zhousl.aether.data.SessionExecutionState
 import com.zhousl.aether.data.SessionFollowUpMode
 import com.zhousl.aether.data.quickActionLabel
@@ -221,6 +228,8 @@ fun ConversationScreen(
     pendingInputs: List<PendingSessionInput>,
     inputValue: String,
     draftAttachments: List<ChatAttachment>,
+    modelOptions: List<ProviderModelOption>,
+    selectedModelKey: String,
     availableSkills: List<InstalledSkill>,
     availableMcpServers: List<McpServerConfig>,
     selectedSkillIds: List<String>,
@@ -234,6 +243,7 @@ fun ConversationScreen(
     showStarterPromptHint: Boolean,
     showTermuxSetupNotice: Boolean,
     onInputChanged: (String) -> Unit,
+    onModelSelected: (String) -> Unit,
     onRemoveDraftAttachment: (String) -> Unit,
     onSetSkillSelected: (String, Boolean) -> Unit,
     onSetMcpServerSelected: (String, Boolean) -> Unit,
@@ -464,7 +474,10 @@ fun ConversationScreen(
             ConversationTopOverlay(
                 modifier = Modifier.align(Alignment.TopCenter),
                 onBodyHeightChanged = { topBarBodyHeightPx = it },
+                modelOptions = modelOptions,
+                selectedModelKey = selectedModelKey,
                 onMenu = onMenu,
+                onModelSelected = onModelSelected,
                 onNewChat = onNewChat,
             )
 
@@ -530,7 +543,10 @@ private fun LazyListState.isAtConversationBottom(): Boolean {
 private fun ConversationTopOverlay(
     modifier: Modifier = Modifier,
     onBodyHeightChanged: (Int) -> Unit,
+    modelOptions: List<ProviderModelOption>,
+    selectedModelKey: String,
     onMenu: () -> Unit,
+    onModelSelected: (String) -> Unit,
     onNewChat: () -> Unit,
 ) {
     Column(
@@ -543,7 +559,10 @@ private fun ConversationTopOverlay(
                 .onSizeChanged { onBodyHeightChanged(it.height) },
         ) {
             ConversationTopBar(
+                modelOptions = modelOptions,
+                selectedModelKey = selectedModelKey,
                 onMenu = onMenu,
+                onModelSelected = onModelSelected,
                 onNewChat = onNewChat,
             )
         }
@@ -559,7 +578,10 @@ private fun ConversationTopOverlay(
 @Composable
 private fun ConversationTopBar(
     modifier: Modifier = Modifier,
+    modelOptions: List<ProviderModelOption>,
+    selectedModelKey: String,
     onMenu: () -> Unit,
+    onModelSelected: (String) -> Unit,
     onNewChat: () -> Unit,
 ) {
     val strings = rememberAetherStrings()
@@ -568,7 +590,6 @@ private fun ConversationTopBar(
             .fillMaxWidth()
             .statusBarsPadding()
             .padding(horizontal = 15.dp, vertical = 12.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
         HeaderCircleButton(
@@ -578,6 +599,14 @@ private fun ConversationTopBar(
             size = 44.dp,
             containerColor = AetherSurface.copy(alpha = 0.96f),
         )
+        ConversationModelSelector(
+            options = modelOptions,
+            selectedModelKey = selectedModelKey,
+            onSelected = onModelSelected,
+            modifier = Modifier
+                .weight(1f)
+                .padding(horizontal = 12.dp),
+        )
         HeaderCircleButton(
             icon = LucideIcons.SquarePen,
             contentDescription = strings.newChat,
@@ -585,6 +614,147 @@ private fun ConversationTopBar(
             size = 44.dp,
             containerColor = AetherSurface.copy(alpha = 0.96f),
         )
+    }
+}
+
+@Composable
+private fun ConversationModelSelector(
+    options: List<ProviderModelOption>,
+    selectedModelKey: String,
+    onSelected: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    var anchorBottomPx by remember { mutableIntStateOf(0) }
+    val menuVisibility = remember { MutableTransitionState(false) }
+    menuVisibility.targetState = expanded
+    val strings = rememberAetherStrings()
+    val density = LocalDensity.current
+    val menuWidth = 276.dp
+    val selectedOption = options.firstOrNull { it.key == selectedModelKey } ?: options.firstOrNull()
+    val fallbackLabel = if (strings.appLanguage == AppLanguage.SimplifiedChinese) {
+        "选择模型"
+    } else {
+        "Select model"
+    }
+
+    Box(
+        modifier = modifier,
+        contentAlignment = Alignment.Center,
+    ) {
+        Row(
+            modifier = Modifier
+                .onGloballyPositioned { coordinates ->
+                    anchorBottomPx = coordinates.boundsInRoot().bottom.toInt()
+                }
+                .clickable(enabled = options.isNotEmpty()) { expanded = true },
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                text = selectedOption?.chatLabel ?: fallbackLabel,
+                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+                color = AetherOnSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.widthIn(max = 180.dp),
+            )
+            Icon(
+                imageVector = Icons.Rounded.ArrowDropDown,
+                contentDescription = null,
+                tint = AetherOnSurfaceVariant,
+                modifier = Modifier.size(22.dp),
+            )
+        }
+
+        if (menuVisibility.currentState || menuVisibility.targetState) {
+            Popup(
+                alignment = Alignment.TopCenter,
+                offset = IntOffset(0, anchorBottomPx - with(density) { 32.dp.roundToPx() }),
+                onDismissRequest = { expanded = false },
+                properties = PopupProperties(
+                    focusable = true,
+                    dismissOnBackPress = true,
+                    dismissOnClickOutside = true,
+                ),
+            ) {
+                androidx.compose.animation.AnimatedVisibility(
+                    visibleState = menuVisibility,
+                    enter = fadeIn() + scaleIn(
+                        initialScale = 0.96f,
+                        transformOrigin = TransformOrigin(0.5f, 0f),
+                    ) + slideInVertically(initialOffsetY = { -it / 10 }),
+                    exit = fadeOut() + scaleOut(
+                        targetScale = 0.98f,
+                        transformOrigin = TransformOrigin(0.5f, 0f),
+                    ) + slideOutVertically(targetOffsetY = { -it / 12 }),
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .width(menuWidth)
+                            .shadow(20.dp, RoundedCornerShape(28.dp), ambientColor = AetherScrim, spotColor = AetherScrim)
+                            .clip(RoundedCornerShape(28.dp))
+                            .background(AetherSurface)
+                            .padding(vertical = 2.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .heightIn(max = 360.dp)
+                                .verticalScroll(rememberScrollState()),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                        ) {
+                            options.forEachIndexed { index, option ->
+                                val isSelected = option.key == selectedOption?.key
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(20.dp))
+                                        .clickable {
+                                            expanded = false
+                                            onSelected(option.key)
+                                        }
+                                        .padding(horizontal = 18.dp, vertical = 15.dp),
+                                ) {
+                                    Text(
+                                        text = option.chatLabel,
+                                        style = MaterialTheme.typography.titleMedium.copy(
+                                            fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium,
+                                        ),
+                                        color = AetherOnSurface,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        textAlign = TextAlign.Center,
+                                        modifier = Modifier
+                                            .align(Alignment.Center)
+                                            .padding(horizontal = 24.dp),
+                                    )
+                                    if (isSelected) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Check,
+                                            contentDescription = null,
+                                            tint = AetherOnSurface,
+                                            modifier = Modifier
+                                                .align(Alignment.CenterEnd)
+                                                .size(22.dp),
+                                        )
+                                    }
+                                }
+                                if (index != options.lastIndex) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 18.dp)
+                                            .height(1.dp)
+                                            .background(AetherOnSurfaceVariant.copy(alpha = 0.12f)),
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1427,7 +1597,7 @@ private fun ConversationComposerBar(
                     Popup(
                         alignment = Alignment.BottomStart,
                         offset = with(density) {
-                            IntOffset(0, -12.dp.roundToPx())
+                            IntOffset(0, -42.dp.roundToPx())
                         },
                         onDismissRequest = { attachmentMenuExpanded = false },
                         properties = PopupProperties(

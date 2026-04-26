@@ -1,5 +1,6 @@
 package com.zhousl.aether.ui
 
+import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
@@ -42,6 +43,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.ClickableText
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Add
@@ -57,6 +59,7 @@ import androidx.compose.material.icons.rounded.MoreHoriz
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Visibility
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -68,6 +71,7 @@ import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -88,7 +92,10 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
@@ -97,9 +104,17 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.core.content.FileProvider
+import com.zhousl.aether.data.AetherPrivacyPolicyUrl
+import com.zhousl.aether.data.AetherWebsiteUrl
+import com.zhousl.aether.data.AppSettings
+import com.zhousl.aether.data.AutomaticModelPurpose
 import com.zhousl.aether.data.LlmProviderConfig
+import com.zhousl.aether.data.ProviderModelOption
 import com.zhousl.aether.data.WorkspaceFileBridge
+import com.zhousl.aether.data.availableModelOptions
+import com.zhousl.aether.data.buildModelOptionKey
 import com.zhousl.aether.data.isOnboardingComplete
+import com.zhousl.aether.data.resolveAutomaticModelKey
 import com.zhousl.aether.data.shouldShowResumeSetupBanner
 import com.zhousl.aether.termux.TermuxContract
 import com.zhousl.aether.ui.theme.AetherBackground
@@ -133,6 +148,10 @@ private const val ScreenTransitionDuration = 320
 private val ScreenTransitionEasing = CubicBezierEasing(0.22f, 0.84f, 0.18f, 1f)
 private const val AssistantLocalFileOpenByteLimit = 32 * 1024 * 1024
 private const val AssistantLocalFileCacheDirectory = "assistant-local-open"
+private const val PrivacyPolicyAnnotationTag = "privacy_policy"
+
+private fun tr(strings: AetherStrings, english: String, chinese: String): String =
+    if (strings.appLanguage == com.zhousl.aether.data.AppLanguage.SimplifiedChinese) chinese else english
 
 private fun AppScreen.depth(): Int = when (this) {
     AppScreen.Onboarding -> 0
@@ -143,6 +162,7 @@ private fun AppScreen.depth(): Int = when (this) {
 @Composable
 fun AetherApp(
     viewModel: AetherViewModel = viewModel(),
+    onPrivacyPolicyAccepted: () -> Unit = {},
 ) {
     val uiState = viewModel.uiState.collectAsStateWithLifecycle().value
     val strings = remember(uiState.settings.language) { aetherStringsFor(uiState.settings.language) }
@@ -157,6 +177,7 @@ fun AetherApp(
                     viewModel = viewModel,
                     uiState = uiState,
                     strings = strings,
+                    onPrivacyPolicyAccepted = onPrivacyPolicyAccepted,
                 )
             }
         }
@@ -168,6 +189,7 @@ private fun AetherAppContent(
     viewModel: AetherViewModel,
     uiState: AetherUiState,
     strings: AetherStrings,
+    onPrivacyPolicyAccepted: () -> Unit,
 ) {
     val drawerState = rememberDrawerState(initialValue = androidx.compose.material3.DrawerValue.Closed)
     val scope = rememberCoroutineScope()
@@ -176,12 +198,32 @@ private fun AetherAppContent(
     val clipboardManager = LocalClipboardManager.current
     val workspaceFileBridge = remember(context) { WorkspaceFileBridge(context) }
     val activeSession = uiState.sessions.firstOrNull { it.id == uiState.currentSessionId }
-    val activeProviderConfig = uiState.providerConfigs.firstOrNull { it.isActive }
+    val activeProviderConfig = uiState.providerConfigs.firstOrNull { it.isEnabled }
+        ?: uiState.providerConfigs.firstOrNull()
     val currentSessionExecution = uiState.sessionExecutionStates[uiState.currentSessionId]
     val currentMessages = activeSession?.messages.orEmpty()
     val selectedSkillIds = activeSession?.selectedSkillIds ?: uiState.draftSelectedSkillIds
     val selectedMcpServerIds = activeSession?.activeMcpServerIds ?: uiState.draftSelectedMcpServerIds
     val agentModeSelected = activeSession?.agentModeEnabled ?: uiState.draftAgentModeEnabled
+    val conversationModelOptions = remember(uiState.providerConfigs, uiState.settings) {
+        buildConversationModelOptions(
+            settings = uiState.settings,
+            providerConfigs = uiState.providerConfigs,
+        )
+    }
+    val selectedConversationModelKey = remember(
+        activeSession?.selectedModelKey,
+        uiState.draftSelectedModelKey,
+        uiState.settings.defaultChatModelKey,
+        conversationModelOptions,
+    ) {
+        resolveConversationModelKey(
+            session = activeSession,
+            draftSelectedModelKey = uiState.draftSelectedModelKey,
+            defaultChatModelKey = uiState.settings.defaultChatModelKey,
+            options = conversationModelOptions,
+        )
+    }
     val pendingToolInvocations = currentSessionExecution?.pendingToolInvocations.orEmpty()
     val pendingResponseBlocks = currentSessionExecution?.pendingResponseBlocks.orEmpty()
     val pendingInputs = currentSessionExecution?.pendingInputs.orEmpty()
@@ -191,6 +233,18 @@ private fun AetherAppContent(
     LaunchedEffect(viewModel, context) {
         viewModel.transientMessages.collectLatest { message ->
             Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+        }
+    }
+    LaunchedEffect(uiState.appUpdate.pendingInstallUri) {
+        val installUri = uiState.appUpdate.pendingInstallUri
+        if (installUri.isNotBlank()) {
+            requestApkInstall(context, Uri.parse(installUri))
+            viewModel.consumePendingUpdateInstallUri()
+        }
+    }
+    LaunchedEffect(uiState.settings.privacyPolicyAccepted) {
+        if (uiState.settings.privacyPolicyAccepted) {
+            onPrivacyPolicyAccepted()
         }
     }
 
@@ -437,6 +491,8 @@ private fun AetherAppContent(
                     pendingInputs = pendingInputs,
                     inputValue = uiState.draftInput,
                     draftAttachments = uiState.draftAttachments,
+                    modelOptions = conversationModelOptions,
+                    selectedModelKey = selectedConversationModelKey,
                     availableSkills = uiState.installedSkills.filter { it.isEnabled },
                     availableMcpServers = uiState.mcpServers.filter { it.isEnabled },
                     selectedSkillIds = selectedSkillIds,
@@ -455,6 +511,7 @@ private fun AetherAppContent(
                     showStarterPromptHint = uiState.showStarterPromptHint,
                     showTermuxSetupNotice = !uiState.awaitingFollowUpTour && !uiState.showFollowUpTourCard,
                     onInputChanged = viewModel::updateDraftInput,
+                    onModelSelected = viewModel::setCurrentChatModelSelection,
                     onRemoveDraftAttachment = viewModel::removeDraftAttachment,
                     onSetSkillSelected = viewModel::setComposerSkillSelected,
                     onSetMcpServerSelected = viewModel::setComposerMcpServerSelected,
@@ -537,18 +594,22 @@ private fun AetherAppContent(
                     agentModeAuthorizationMethod = uiState.settings.agentModeAuthorizationMethod,
                     language = uiState.settings.language,
                     themeMode = uiState.settings.themeMode,
+                    defaultChatModelKey = uiState.settings.defaultChatModelKey,
+                    defaultTitleModelKey = uiState.settings.defaultTitleModelKey,
+                    defaultNamingModelKey = uiState.settings.defaultNamingModelKey,
                     agentModeDisplayState = uiState.agentModeDisplayState,
                     providerConfigs = uiState.providerConfigs,
                     termuxSetupState = uiState.termuxSetupState,
                     installedSkills = uiState.installedSkills,
                     mcpServers = uiState.mcpServers,
                     isFetchingModels = uiState.isFetchingModels,
+                    appUpdate = uiState.appUpdate,
                     onSave = viewModel::saveSettings,
                     onUpdateLanguage = viewModel::updateAppLanguage,
                     onUpdateThemeMode = viewModel::updateAppThemeMode,
                     onUpsertProviderConfig = viewModel::upsertProviderConfig,
                     onRemoveProviderConfig = viewModel::removeProviderConfig,
-                    onSetActiveProvider = viewModel::setActiveProvider,
+                    onSetProviderEnabled = viewModel::setProviderEnabled,
                     onFetchModels = viewModel::fetchModels,
                     onImportSkillFolder = { skillFolderPicker.launch(null) },
                     onImportSkillZip = { onComplete ->
@@ -582,12 +643,190 @@ private fun AetherAppContent(
                     onReplayFollowUpOnboarding = viewModel::openFollowUpOnboardingFromSettings,
                     onStopAgentModeDisplay = viewModel::stopAgentModeDisplay,
                     onRefreshAgentModeDisplays = viewModel::refreshAgentModeDisplays,
+                    onOpenWebsite = { openExternalUrl(context, AetherWebsiteUrl) },
+                    onOpenPrivacyPolicy = { openExternalUrl(context, AetherPrivacyPolicyUrl) },
+                    onCheckForUpdates = viewModel::checkForUpdates,
+                    onForceUpdateCheckForTesting = viewModel::forceUpdateCheckForTesting,
+                    onDownloadAndInstallUpdate = viewModel::downloadAndInstallUpdate,
                     onBack = viewModel::closeSettings,
                 )
-                }
+        }
             }
         }
+
+        if (uiState.isStartupRouteResolved && !uiState.settings.privacyPolicyAccepted) {
+            PrivacyPolicyConsentDialog(
+                strings = strings,
+                onOpenPolicy = { openPrivacyPolicy(context) },
+                onAccept = viewModel::acceptPrivacyPolicy,
+                onDecline = { (context as? Activity)?.finishAffinity() },
+            )
+        }
+        val availableUpdate = uiState.appUpdate.availableRelease
+        if (
+            uiState.appUpdate.showAvailableDialog &&
+            availableUpdate != null &&
+            uiState.settings.privacyPolicyAccepted
+        ) {
+            AppUpdateAvailableDialog(
+                strings = strings,
+                updateState = uiState.appUpdate,
+                onDismiss = viewModel::dismissUpdateAvailableDialog,
+                onDownloadAndInstall = viewModel::downloadAndInstallUpdate,
+            )
+        }
     }
+}
+
+@Composable
+private fun PrivacyPolicyConsentDialog(
+    strings: AetherStrings,
+    onOpenPolicy: () -> Unit,
+    onAccept: () -> Unit,
+    onDecline: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = {},
+        containerColor = AetherSurface,
+        titleContentColor = AetherOnSurface,
+        textContentColor = AetherOnSurfaceVariant,
+        title = {
+            Text(
+                text = tr(strings, "Privacy Policy", "\u9690\u79c1\u653f\u7b56"),
+                style = MaterialTheme.typography.titleLarge,
+            )
+        },
+        text = {
+            val policyText = tr(strings, "Privacy Policy", "\u9690\u79c1\u653f\u7b56")
+            val annotatedText = buildAnnotatedString {
+                append(tr(strings, "Please review and agree to Aether's ", "\u4f7f\u7528 Aether \u524d\uff0c\u8bf7\u5148\u9605\u8bfb\u5e76\u540c\u610f\u6211\u4eec\u7684"))
+                pushStringAnnotation(
+                    tag = PrivacyPolicyAnnotationTag,
+                    annotation = AetherPrivacyPolicyUrl,
+                )
+                withStyle(SpanStyle(color = Color(0xFF3B82F6))) {
+                    append(policyText)
+                }
+                pop()
+                append(tr(strings, " before using the app.", "\u3002"))
+            }
+            ClickableText(
+                text = annotatedText,
+                style = MaterialTheme.typography.bodyMedium.copy(color = AetherOnSurfaceVariant),
+                onClick = { offset ->
+                    annotatedText
+                        .getStringAnnotations(PrivacyPolicyAnnotationTag, offset, offset)
+                        .firstOrNull()
+                        ?.let { onOpenPolicy() }
+                },
+            )
+        },
+        confirmButton = {
+            Button(
+                onClick = onAccept,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = AetherPrimary,
+                    contentColor = Color.White,
+                ),
+            ) {
+                Text(text = tr(strings, "Agree", "\u540c\u610f"))
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDecline) {
+                Text(
+                    text = tr(strings, "Decline", "\u4e0d\u540c\u610f"),
+                    color = AetherOnSurfaceVariant,
+                )
+            }
+        },
+    )
+}
+
+@Composable
+private fun AppUpdateAvailableDialog(
+    strings: AetherStrings,
+    updateState: AppUpdateUiState,
+    onDismiss: () -> Unit,
+    onDownloadAndInstall: () -> Unit,
+) {
+    val release = updateState.availableRelease ?: return
+    val progress = updateState.downloadProgress
+    AlertDialog(
+        onDismissRequest = {
+            if (!updateState.isDownloading) onDismiss()
+        },
+        containerColor = AetherSurface,
+        titleContentColor = AetherOnSurface,
+        textContentColor = AetherOnSurfaceVariant,
+        title = {
+            Text(
+                text = tr(strings, "Update available", "\u53d1\u73b0\u65b0\u7248\u672c"),
+                style = MaterialTheme.typography.titleLarge,
+            )
+        },
+        text = {
+            Column {
+                Text(
+                    text = tr(
+                        strings,
+                        "Aether ${release.versionName} is available. You can download the APK and install it now.",
+                        "Aether ${release.versionName} \u5df2\u53ef\u7528\uff0c\u53ef\u4ee5\u7acb\u5373\u4e0b\u8f7d APK \u5e76\u5b89\u88c5\u3002",
+                    ),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = AetherOnSurfaceVariant,
+                )
+                if (updateState.isDownloading) {
+                    Spacer(Modifier.height(16.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            color = AetherPrimary,
+                            strokeWidth = 2.dp,
+                        )
+                        Text(
+                            text = if (progress != null) {
+                                "${(progress * 100).toInt()}%"
+                            } else {
+                                tr(strings, "Downloading...", "\u6b63\u5728\u4e0b\u8f7d...")
+                            },
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = AetherOnSurface,
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onDownloadAndInstall,
+                enabled = !updateState.isDownloading,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = AetherPrimary,
+                    contentColor = Color.White,
+                ),
+            ) {
+                Text(
+                    text = tr(strings, "Download and install", "\u4e0b\u8f7d\u5e76\u5b89\u88c5"),
+                    style = MaterialTheme.typography.labelLarge,
+                )
+            }
+        },
+        dismissButton = {
+            TextButton(
+                onClick = onDismiss,
+                enabled = !updateState.isDownloading,
+            ) {
+                Text(
+                    text = tr(strings, "Later", "\u7a0d\u540e"),
+                    color = AetherOnSurfaceVariant,
+                )
+            }
+        },
+    )
 }
 
 private fun saveAttachmentToDocument(
@@ -684,6 +923,21 @@ private suspend fun openAssistantLocalFile(
     }
 }
 
+private fun requestApkInstall(
+    context: android.content.Context,
+    apkUri: Uri,
+) {
+    val intent = Intent(Intent.ACTION_VIEW).apply {
+        setDataAndType(apkUri, "application/vnd.android.package-archive")
+        putExtra(Intent.EXTRA_NOT_UNKNOWN_SOURCE, true)
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    launchIntentSafely(context, intent) {
+        Toast.makeText(context, "Unable to open the APK installer", Toast.LENGTH_SHORT).show()
+    }
+}
+
 private fun normalizeAssistantLink(rawLink: String): String {
     val trimmed = rawLink.trim().removeSurrounding("<", ">")
     if (trimmed.isBlank()) return trimmed
@@ -706,6 +960,43 @@ private fun looksLikeWorkspaceFileLink(rawLink: String): Boolean {
     if (trimmed.startsWith("~/")) return true
     if (trimmed.startsWith("/")) return true
     return false
+}
+
+private fun buildConversationModelOptions(
+    settings: AppSettings,
+    providerConfigs: List<LlmProviderConfig>,
+): List<ProviderModelOption> {
+    val configuredOptions = providerConfigs.availableModelOptions()
+    if (configuredOptions.isNotEmpty()) {
+        return configuredOptions
+    }
+    return listOf(
+        ProviderModelOption(
+            key = buildModelOptionKey("legacy", settings.modelId),
+            providerConfigId = "legacy",
+            providerId = settings.provider.storageValue,
+            providerName = settings.provider.displayName,
+            providerType = settings.provider,
+            apiKey = settings.apiKey,
+            baseUrl = settings.baseUrl,
+            modelId = settings.modelId,
+            fullLabel = "${settings.provider.storageValue}/${settings.modelId}",
+            chatLabel = settings.modelId,
+        )
+    ).filter { it.modelId.isNotBlank() && it.baseUrl.isNotBlank() }
+}
+
+private fun resolveConversationModelKey(
+    session: ChatSession?,
+    draftSelectedModelKey: String,
+    defaultChatModelKey: String,
+    options: List<ProviderModelOption>,
+): String {
+    val preferredKey = session?.selectedModelKey
+        ?.takeIf { key -> options.any { it.key == key } }
+        ?: draftSelectedModelKey.takeIf { key -> options.any { it.key == key } }
+        ?: defaultChatModelKey.takeIf { key -> options.any { it.key == key } }
+    return preferredKey ?: options.resolveAutomaticModelKey(AutomaticModelPurpose.Chat)
 }
 
 private fun openAppPermissionSettings(
@@ -760,6 +1051,24 @@ private fun openTermuxInstallPage(
         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     }
     launchIntentSafely(context, intent)
+}
+
+private fun openPrivacyPolicy(
+    context: android.content.Context,
+) {
+    openExternalUrl(context, AetherPrivacyPolicyUrl)
+}
+
+private fun openExternalUrl(
+    context: android.content.Context,
+    url: String,
+) {
+    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    launchIntentSafely(context, intent) {
+        Toast.makeText(context, "Unable to open that link", Toast.LENGTH_SHORT).show()
+    }
 }
 
 private fun launchIntentSafely(

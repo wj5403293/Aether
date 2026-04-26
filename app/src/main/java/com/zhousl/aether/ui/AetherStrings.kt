@@ -440,7 +440,6 @@ fun AetherStrings.toolInvocationGroupTitle(count: Int, isRunning: Boolean): Stri
     isRunning -> "Executing $count tools"
     else -> "Executed $count tools"
 }
-
 fun AetherStrings.toolInvocationTitleLabel(
     toolName: String,
     isRunning: Boolean,

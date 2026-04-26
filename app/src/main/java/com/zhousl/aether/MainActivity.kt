@@ -18,10 +18,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        maybeRequestNotificationPermission()
         enableEdgeToEdge()
         setContent {
-            AetherApp()
+            AetherApp(onPrivacyPolicyAccepted = ::maybeRequestNotificationPermission)
         }
     }
 

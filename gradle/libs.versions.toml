@@ -1,7 +1,6 @@
 [versions]
-agp = "8.5.2"
-kotlin = "1.9.24"
-composeCompiler = "1.5.14"
+agp = "8.13.2"
+kotlin = "2.3.21"
 coreKtx = "1.13.1"
 lifecycleRuntimeKtx = "2.8.6"
 activityCompose = "1.9.2"
@@ -18,6 +17,7 @@ jsoup = "1.18.1"
 flexmark = "0.64.8"
 shizuku = "13.1.5"
 androidAppProcess = "1.4.3"
+posthogAndroid = "3.43.0"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -46,7 +46,9 @@ flexmark-html2md-converter = { group = "com.vladsch.flexmark", name = "flexmark-
 shizuku-api = { group = "dev.rikka.shizuku", name = "api", version.ref = "shizuku" }
 shizuku-provider = { group = "dev.rikka.shizuku", name = "provider", version.ref = "shizuku" }
 android-app-process = { group = "io.github.iamr0s", name = "AndroidAppProcess", version.ref = "androidAppProcess" }
+posthog-android = { group = "com.posthog", name = "posthog-android", version.ref = "posthogAndroid" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
 kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+compose-compiler = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }

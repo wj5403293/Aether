@@ -3,4 +3,7 @@
     <cache-path
         name="assistant_local_open"
         path="assistant-local-open/" />
+    <cache-path
+        name="app_updates"
+        path="updates/" />
 </paths>

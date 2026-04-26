@@ -45,6 +45,14 @@ class OpenAiCompatibleClient(
         toolChoice: String? = null,
     ): Result<ChatCompletionResult> = try {
         val request = when (settings.provider) {
+            LlmProvider.OpenAiResponses -> buildOpenAiResponsesRequest(
+                settings = settings,
+                systemPrompt = systemPrompt,
+                conversation = conversation,
+                tools = tools,
+                toolChoice = toolChoice,
+            )
+
             LlmProvider.OpenAiCompatible -> buildOpenAiRequest(
                 settings = settings,
                 systemPrompt = systemPrompt,
@@ -54,6 +62,14 @@ class OpenAiCompatibleClient(
             )
 
             LlmProvider.VertexExpress -> buildVertexRequest(
+                settings = settings,
+                systemPrompt = systemPrompt,
+                conversation = conversation,
+                tools = tools,
+                toolChoice = toolChoice,
+            )
+
+            LlmProvider.AnthropicMessages -> buildAnthropicMessagesRequest(
                 settings = settings,
                 systemPrompt = systemPrompt,
                 conversation = conversation,
@@ -78,8 +94,10 @@ class OpenAiCompatibleClient(
 
         Result.success(
             when (settings.provider) {
+                LlmProvider.OpenAiResponses -> parseOpenAiResponses(json)
                 LlmProvider.OpenAiCompatible -> parseOpenAiChatCompletion(json)
                 LlmProvider.VertexExpress -> parseVertexGenerateContent(json)
+                LlmProvider.AnthropicMessages -> parseAnthropicMessage(json)
             }
         )
     } catch (cancellationException: CancellationException) {
@@ -99,6 +117,16 @@ class OpenAiCompatibleClient(
     ): Result<ChatCompletionResult> = try {
         Result.success(
             when (settings.provider) {
+                LlmProvider.OpenAiResponses -> streamOpenAiResponses(
+                    settings = settings,
+                    systemPrompt = systemPrompt,
+                    conversation = conversation,
+                    tools = tools,
+                    toolChoice = toolChoice,
+                    onTextDelta = onTextDelta,
+                    onStreamActivity = onStreamActivity,
+                )
+
                 LlmProvider.OpenAiCompatible -> streamOpenAiChatCompletion(
                     settings = settings,
                     systemPrompt = systemPrompt,
@@ -110,6 +138,16 @@ class OpenAiCompatibleClient(
                 )
 
                 LlmProvider.VertexExpress -> streamVertexGenerateContent(
+                    settings = settings,
+                    systemPrompt = systemPrompt,
+                    conversation = conversation,
+                    tools = tools,
+                    toolChoice = toolChoice,
+                    onTextDelta = onTextDelta,
+                    onStreamActivity = onStreamActivity,
+                )
+
+                LlmProvider.AnthropicMessages -> streamAnthropicMessages(
                     settings = settings,
                     systemPrompt = systemPrompt,
                     conversation = conversation,
@@ -131,8 +169,10 @@ class OpenAiCompatibleClient(
         messages: List<LlmMessage>,
     ): List<JSONObject> = messages.map { message ->
         when (settings.provider) {
+            LlmProvider.OpenAiResponses -> serializeOpenAiResponsesConversationMessage(message)
             LlmProvider.OpenAiCompatible -> serializeOpenAiConversationMessage(message)
             LlmProvider.VertexExpress -> serializeVertexConversationMessage(message)
+            LlmProvider.AnthropicMessages -> serializeAnthropicConversationMessage(message)
         }
     }
 
@@ -142,6 +182,12 @@ class OpenAiCompatibleClient(
         name: String,
         output: String,
     ): JSONObject = when (settings.provider) {
+        LlmProvider.OpenAiResponses -> JSONObject().apply {
+            put("type", "function_call_output")
+            put("call_id", callId)
+            put("output", output)
+        }
+
         LlmProvider.OpenAiCompatible -> JSONObject().apply {
             put("role", "tool")
             put("tool_call_id", callId)
@@ -167,6 +213,20 @@ class OpenAiCompatibleClient(
                                 )
                             }
                         )
+                    }
+                )
+            )
+        }
+
+        LlmProvider.AnthropicMessages -> JSONObject().apply {
+            put("role", "user")
+            put(
+                "content",
+                JSONArray().put(
+                    JSONObject().apply {
+                        put("type", "tool_result")
+                        put("tool_use_id", callId)
+                        put("content", output)
                     }
                 )
             )
@@ -217,6 +277,47 @@ class OpenAiCompatibleClient(
             assistantText = assistantText,
             toolCalls = toolCalls,
             assistantMessage = JSONObject(message.toString()),
+        )
+    }
+
+    private fun parseOpenAiResponses(json: JSONObject): ChatCompletionResult {
+        val output = json.optJSONArray("output") ?: JSONArray()
+        return buildOpenAiResponsesResult(output)
+    }
+
+    private fun parseAnthropicMessage(json: JSONObject): ChatCompletionResult {
+        val content = json.optJSONArray("content") ?: JSONArray()
+        val assistantText = buildString {
+            for (index in 0 until content.length()) {
+                val block = content.optJSONObject(index) ?: continue
+                if (block.optString("type") != "text") continue
+                val text = block.optString("text")
+                if (text.isBlank()) continue
+                if (isNotEmpty()) append('\n')
+                append(text)
+            }
+        }
+        val toolCalls = buildList {
+            for (index in 0 until content.length()) {
+                val block = content.optJSONObject(index) ?: continue
+                if (block.optString("type") != "tool_use") continue
+                add(
+                    ChatCompletionToolCall(
+                        id = block.optString("id").ifBlank { generatedToolCallId("anthropic", index) },
+                        name = block.optString("name"),
+                        arguments = jsonValueToString(block.opt("input")),
+                    )
+                )
+            }
+        }
+
+        return ChatCompletionResult(
+            assistantText = assistantText,
+            toolCalls = toolCalls,
+            assistantMessage = JSONObject().apply {
+                put("role", "assistant")
+                put("content", JSONArray(content.toString()))
+            },
         )
     }
 
@@ -281,6 +382,32 @@ class OpenAiCompatibleClient(
         }
     }
 
+    private fun serializeOpenAiResponsesConversationMessage(message: LlmMessage): JSONObject = JSONObject().apply {
+        put("role", message.role)
+        put(
+            "content",
+            JSONArray().apply {
+                message.contentParts.forEach { part -> put(serializeOpenAiResponsesContentPart(part, message.role)) }
+            }
+        )
+    }
+
+    private fun serializeAnthropicConversationMessage(message: LlmMessage): JSONObject = JSONObject().apply {
+        put(
+            "role",
+            when (message.role) {
+                "assistant" -> "assistant"
+                else -> "user"
+            }
+        )
+        put(
+            "content",
+            JSONArray().apply {
+                message.contentParts.forEach { part -> put(serializeAnthropicContentPart(part)) }
+            }
+        )
+    }
+
     private fun serializeVertexConversationMessage(message: LlmMessage): JSONObject = JSONObject().apply {
         put(
             "role",
@@ -314,6 +441,40 @@ class OpenAiCompatibleClient(
         }
     }
 
+    private fun serializeOpenAiResponsesContentPart(
+        part: LlmContentPart,
+        role: String,
+    ): JSONObject = when (part) {
+        is LlmTextPart -> JSONObject().apply {
+            put("type", if (role == "assistant") "output_text" else "input_text")
+            put("text", part.text)
+        }
+
+        is LlmImagePart -> JSONObject().apply {
+            put("type", "input_image")
+            put("image_url", "data:${part.mimeType};base64,${part.base64Data}")
+        }
+    }
+
+    private fun serializeAnthropicContentPart(part: LlmContentPart): JSONObject = when (part) {
+        is LlmTextPart -> JSONObject().apply {
+            put("type", "text")
+            put("text", part.text)
+        }
+
+        is LlmImagePart -> JSONObject().apply {
+            put("type", "image")
+            put(
+                "source",
+                JSONObject().apply {
+                    put("type", "base64")
+                    put("media_type", part.mimeType)
+                    put("data", part.base64Data)
+                }
+            )
+        }
+    }
+
     private fun serializeVertexContentPart(part: LlmContentPart): JSONObject = when (part) {
         is LlmTextPart -> JSONObject().apply {
             put("text", part.text)
@@ -328,6 +489,35 @@ class OpenAiCompatibleClient(
                 }
             )
         }
+    }
+
+    private suspend fun streamOpenAiResponses(
+        settings: AppSettings,
+        systemPrompt: String,
+        conversation: List<JSONObject>,
+        tools: List<JSONObject>,
+        toolChoice: String?,
+        onTextDelta: suspend (String) -> Unit,
+        onStreamActivity: suspend () -> Unit,
+    ): ChatCompletionResult {
+        val accumulator = OpenAiResponsesStreamAccumulator(onTextDelta)
+        return executeStreamingRequest(
+            request = buildOpenAiResponsesRequest(
+                settings = settings,
+                systemPrompt = systemPrompt,
+                conversation = conversation,
+                tools = tools,
+                toolChoice = toolChoice,
+                stream = true,
+            ),
+            parseJsonResponse = ::parseOpenAiResponses,
+            consumeSseChunk = accumulator::consume,
+            buildStreamResult = accumulator::buildResult,
+            inactivityTimeoutSeconds = settings.llmInactivityReconnectTimeoutSeconds,
+            onStreamActivity = onStreamActivity,
+            isTerminalEventData = { eventData -> eventData == "[DONE]" },
+            isTerminalChunk = ::openAiResponsesChunkSignalsCompletion,
+        )
     }
 
     private suspend fun streamOpenAiChatCompletion(
@@ -358,6 +548,34 @@ class OpenAiCompatibleClient(
         )
     }
 
+    private suspend fun streamAnthropicMessages(
+        settings: AppSettings,
+        systemPrompt: String,
+        conversation: List<JSONObject>,
+        tools: List<JSONObject>,
+        toolChoice: String?,
+        onTextDelta: suspend (String) -> Unit,
+        onStreamActivity: suspend () -> Unit,
+    ): ChatCompletionResult {
+        val accumulator = AnthropicStreamAccumulator(onTextDelta)
+        return executeStreamingRequest(
+            request = buildAnthropicMessagesRequest(
+                settings = settings,
+                systemPrompt = systemPrompt,
+                conversation = conversation,
+                tools = tools,
+                toolChoice = toolChoice,
+                stream = true,
+            ),
+            parseJsonResponse = ::parseAnthropicMessage,
+            consumeSseChunk = accumulator::consume,
+            buildStreamResult = accumulator::buildResult,
+            inactivityTimeoutSeconds = settings.llmInactivityReconnectTimeoutSeconds,
+            onStreamActivity = onStreamActivity,
+            isTerminalChunk = ::anthropicChunkSignalsCompletion,
+        )
+    }
+
     private suspend fun streamVertexGenerateContent(
         settings: AppSettings,
         systemPrompt: String,
@@ -384,6 +602,55 @@ class OpenAiCompatibleClient(
             onStreamActivity = onStreamActivity,
             isTerminalChunk = ::vertexChunkSignalsCompletion,
         )
+    }
+
+    private fun buildOpenAiResponsesRequest(
+        settings: AppSettings,
+        systemPrompt: String,
+        conversation: List<JSONObject>,
+        tools: List<JSONObject>,
+        toolChoice: String?,
+        stream: Boolean = false,
+    ): Request {
+        val endpoint = buildOpenAiResponsesEndpoint(settings.baseUrl)
+        val payload = JSONObject().apply {
+            put("model", settings.modelId.trim())
+            put("store", false)
+            if (systemPrompt.isNotBlank()) {
+                put("instructions", systemPrompt)
+            }
+            put(
+                "input",
+                JSONArray().apply {
+                    conversation.forEach { item ->
+                        appendOpenAiResponsesInputItem(item)
+                    }
+                }
+            )
+            if (tools.isNotEmpty()) {
+                put("tools", JSONArray().apply { tools.forEach { put(convertOpenAiToolToResponsesTool(it)) } })
+                put("tool_choice", toolChoice ?: "auto")
+            }
+            if (stream) {
+                put("stream", true)
+            }
+        }
+
+        return Request.Builder()
+            .url(endpoint)
+            .addHeader("Content-Type", "application/json")
+            .apply {
+                if (stream) {
+                    addHeader("Accept", "text/event-stream")
+                }
+            }
+            .apply {
+                if (settings.apiKey.isNotBlank()) {
+                    addHeader("Authorization", "Bearer ${settings.apiKey.trim()}")
+                }
+            }
+            .post(payload.toString().toRequestBody(JsonMediaType))
+            .build()
     }
 
     private fun buildOpenAiRequest(
@@ -433,6 +700,61 @@ class OpenAiCompatibleClient(
                     addHeader("Authorization", "Bearer ${settings.apiKey.trim()}")
                 }
             }
+            .post(payload.toString().toRequestBody(JsonMediaType))
+            .build()
+    }
+
+    private fun buildAnthropicMessagesRequest(
+        settings: AppSettings,
+        systemPrompt: String,
+        conversation: List<JSONObject>,
+        tools: List<JSONObject>,
+        toolChoice: String?,
+        stream: Boolean = false,
+    ): Request {
+        val endpoint = buildAnthropicMessagesEndpoint(settings.baseUrl)
+        val trimmedApiKey = settings.apiKey.trim()
+        if (trimmedApiKey.isBlank()) {
+            error("API Key is required for Anthropic Messages API.")
+        }
+        val payload = JSONObject().apply {
+            put("model", settings.modelId.trim())
+            put("max_tokens", DefaultAnthropicMaxTokens)
+            if (systemPrompt.isNotBlank()) {
+                put("system", systemPrompt)
+            }
+            put(
+                "messages",
+                JSONArray().apply {
+                    conversation.forEach(::put)
+                }
+            )
+            if (tools.isNotEmpty()) {
+                put("tools", JSONArray().apply { tools.forEach { put(convertOpenAiToolToAnthropicTool(it)) } })
+                put(
+                    "tool_choice",
+                    JSONObject().apply {
+                        put(
+                            "type",
+                            when (toolChoice) {
+                                "required" -> "any"
+                                else -> "auto"
+                            }
+                        )
+                    }
+                )
+            }
+            if (stream) {
+                put("stream", true)
+            }
+        }
+
+        return Request.Builder()
+            .url(endpoint)
+            .addHeader("Content-Type", "application/json")
+            .addHeader("Accept", if (stream) "text/event-stream" else "application/json")
+            .addHeader("x-api-key", trimmedApiKey)
+            .addHeader("anthropic-version", AnthropicVersion)
             .post(payload.toString().toRequestBody(JsonMediaType))
             .build()
     }
@@ -524,12 +846,30 @@ class OpenAiCompatibleClient(
             .build()
     }
 
-    private fun buildOpenAiChatCompletionEndpoint(baseUrl: String): String {
-        val normalizedBaseUrl = baseUrl.trim()
-            .ifBlank { error("Base URL is required.") }
-            .toHttpUrlOrNull()
-            ?: error("Base URL is not a valid absolute URL.")
+    private fun buildOpenAiResponsesEndpoint(baseUrl: String): String {
+        val normalizedBaseUrl = parseAbsoluteBaseUrl(baseUrl)
+        val pathSegments = normalizedBaseUrl.pathSegments.filter { it.isNotBlank() }
+        val builder = normalizedBaseUrl.newBuilder()
+            .query(null)
+            .fragment(null)
 
+        if (pathSegments.lastOrNull() == "responses") {
+            return builder.build().toString()
+        }
+
+        if (pathSegments.takeLast(2) == listOf("chat", "completions")) {
+            builder.removePathSegment(builder.build().pathSize - 1)
+            builder.removePathSegment(builder.build().pathSize - 1)
+        }
+
+        return builder
+            .addPathSegment("responses")
+            .build()
+            .toString()
+    }
+
+    private fun buildOpenAiChatCompletionEndpoint(baseUrl: String): String {
+        val normalizedBaseUrl = parseAbsoluteBaseUrl(baseUrl)
         val pathSegments = normalizedBaseUrl.pathSegments.filter { it.isNotBlank() }
         val builder = normalizedBaseUrl.newBuilder()
             .query(null)
@@ -544,6 +884,29 @@ class OpenAiCompatibleClient(
             .build()
             .toString()
     }
+
+    private fun buildAnthropicMessagesEndpoint(baseUrl: String): String {
+        val normalizedBaseUrl = parseAbsoluteBaseUrl(baseUrl)
+        val pathSegments = normalizedBaseUrl.pathSegments.filter { it.isNotBlank() }
+        val builder = normalizedBaseUrl.newBuilder()
+            .query(null)
+            .fragment(null)
+
+        if (pathSegments.lastOrNull() == "messages") {
+            return builder.build().toString()
+        }
+
+        return builder
+            .addPathSegment("messages")
+            .build()
+            .toString()
+    }
+
+    private fun parseAbsoluteBaseUrl(baseUrl: String): HttpUrl =
+        baseUrl.trim()
+            .ifBlank { error("Base URL is required.") }
+            .toHttpUrlOrNull()
+            ?: error("Base URL is not a valid absolute URL.")
 
     private fun buildVertexEndpoint(
         baseUrl: String,
@@ -620,6 +983,52 @@ class OpenAiCompatibleClient(
                 put("parametersJsonSchema", JSONObject(parameters.toString()))
             }
         }
+    }
+
+    private fun convertOpenAiToolToResponsesTool(tool: JSONObject): JSONObject {
+        val function = tool.optJSONObject("function")
+            ?: error("Tool definition is missing its function payload.")
+        return JSONObject().apply {
+            put("type", "function")
+            put("name", function.optString("name"))
+            put("description", function.optString("description"))
+            put(
+                "parameters",
+                function.optJSONObject("parameters")?.let { JSONObject(it.toString()) } ?: emptyObjectSchema()
+            )
+            if (function.has("strict")) {
+                put("strict", function.optBoolean("strict"))
+            }
+        }
+    }
+
+    private fun convertOpenAiToolToAnthropicTool(tool: JSONObject): JSONObject {
+        val function = tool.optJSONObject("function")
+            ?: error("Tool definition is missing its function payload.")
+        return JSONObject().apply {
+            put("name", function.optString("name"))
+            put("description", function.optString("description"))
+            put(
+                "input_schema",
+                function.optJSONObject("parameters")?.let { JSONObject(it.toString()) } ?: emptyObjectSchema()
+            )
+        }
+    }
+
+    private fun JSONArray.appendOpenAiResponsesInputItem(item: JSONObject) {
+        val wrappedItems = item.optJSONArray(OpenAiResponsesItemsKey)
+        if (wrappedItems != null) {
+            for (index in 0 until wrappedItems.length()) {
+                wrappedItems.optJSONObject(index)?.let(::put)
+            }
+            return
+        }
+        put(item)
+    }
+
+    private fun emptyObjectSchema(): JSONObject = JSONObject().apply {
+        put("type", "object")
+        put("properties", JSONObject())
     }
 
     private fun parseJsonObject(bodyString: String): JSONObject? {
@@ -985,6 +1394,227 @@ private class OpenAiStreamAccumulator(
     }
 }
 
+private class OpenAiResponsesStreamAccumulator(
+    private val onTextDelta: suspend (String) -> Unit,
+) {
+    private val assistantText = StringBuilder()
+    private val messageContent = mutableListOf<JSONObject>()
+    private val toolCalls = linkedMapOf<Int, MutableToolCallAccumulator>()
+    private val completedFunctionCalls = linkedMapOf<Int, JSONObject>()
+
+    suspend fun consume(chunk: JSONObject) {
+        when (chunk.optString("type")) {
+            "response.output_text.delta" -> {
+                val delta = chunk.optString("delta")
+                if (delta.isNotEmpty()) {
+                    assistantText.append(delta)
+                    onTextDelta(delta)
+                }
+            }
+
+            "response.output_item.added" -> {
+                consumeOutputItem(
+                    index = chunk.optInt("output_index", completedFunctionCalls.size),
+                    item = chunk.optJSONObject("item"),
+                    overwriteArguments = false,
+                )
+            }
+
+            "response.output_item.done" -> {
+                consumeOutputItem(
+                    index = chunk.optInt("output_index", completedFunctionCalls.size),
+                    item = chunk.optJSONObject("item"),
+                    overwriteArguments = true,
+                )
+            }
+
+            "response.function_call_arguments.delta" -> {
+                val index = chunk.optInt("output_index", toolCalls.size)
+                val accumulator = toolCalls.getOrPut(index) { MutableToolCallAccumulator() }
+                accumulator.arguments.append(chunk.optString("delta"))
+            }
+
+            "response.function_call_arguments.done" -> {
+                val index = chunk.optInt("output_index", toolCalls.size)
+                val arguments = chunk.optString("arguments")
+                if (arguments.isNotBlank()) {
+                    val accumulator = toolCalls.getOrPut(index) { MutableToolCallAccumulator() }
+                    accumulator.arguments.setLength(0)
+                    accumulator.arguments.append(arguments)
+                }
+            }
+        }
+    }
+
+    fun buildResult(): ChatCompletionResult {
+        val resolvedMessageContent = if (assistantText.isNotBlank()) {
+            listOf(
+                JSONObject().apply {
+                    put("type", "output_text")
+                    put("text", assistantText.toString())
+                }
+            )
+        } else {
+            messageContent
+        }
+        val responseItems = JSONArray().apply {
+            if (resolvedMessageContent.isNotEmpty()) {
+                put(
+                    JSONObject().apply {
+                        put("type", "message")
+                        put("role", "assistant")
+                        put("content", JSONArray().apply { resolvedMessageContent.forEach(::put) })
+                    }
+                )
+            }
+            completedFunctionCalls.toSortedMap().values.forEach(::put)
+        }
+        return buildOpenAiResponsesResult(responseItems)
+    }
+
+    private fun consumeOutputItem(
+        index: Int,
+        item: JSONObject?,
+        overwriteArguments: Boolean,
+    ) {
+        if (item == null) return
+        when (item.optString("type")) {
+            "message" -> {
+                val content = item.optJSONArray("content") ?: return
+                for (contentIndex in 0 until content.length()) {
+                    val block = content.optJSONObject(contentIndex) ?: continue
+                    if (block.optString("type") == "output_text" && block.optString("text").isNotBlank()) {
+                        messageContent += JSONObject(block.toString())
+                    }
+                }
+            }
+
+            "function_call" -> {
+                val accumulator = toolCalls.getOrPut(index) { MutableToolCallAccumulator() }
+                item.optString("call_id").trim().ifBlank { item.optString("id").trim() }.let { id ->
+                    if (id.isNotBlank()) accumulator.id = id
+                }
+                item.optString("name").trim().let { name ->
+                    if (name.isNotBlank()) accumulator.name = name
+                }
+                val arguments = item.optString("arguments")
+                if (arguments.isNotBlank()) {
+                    if (overwriteArguments) accumulator.arguments.setLength(0)
+                    accumulator.arguments.append(arguments)
+                }
+                completedFunctionCalls[index] = JSONObject(item.toString()).apply {
+                    if (!has("call_id") && accumulator.id.isNotBlank()) {
+                        put("call_id", accumulator.id)
+                    }
+                    if (!has("name") && accumulator.name.isNotBlank()) {
+                        put("name", accumulator.name)
+                    }
+                    if (!has("arguments")) {
+                        put("arguments", accumulator.arguments.toString())
+                    }
+                }
+            }
+        }
+    }
+}
+
+private class AnthropicStreamAccumulator(
+    private val onTextDelta: suspend (String) -> Unit,
+) {
+    private val assistantText = StringBuilder()
+    private val contentBlocks = mutableListOf<JSONObject>()
+    private val toolUseBlocks = linkedMapOf<Int, MutableAnthropicToolUseAccumulator>()
+
+    suspend fun consume(chunk: JSONObject) {
+        when (chunk.optString("type")) {
+            "content_block_start" -> {
+                val index = chunk.optInt("index", contentBlocks.size)
+                val block = chunk.optJSONObject("content_block") ?: return
+                ensureContentBlock(index, block)
+                if (block.optString("type") == "tool_use") {
+                    val accumulator = toolUseBlocks.getOrPut(index) { MutableAnthropicToolUseAccumulator() }
+                    accumulator.id = block.optString("id")
+                    accumulator.name = block.optString("name")
+                    block.optJSONObject("input")?.let { input ->
+                        accumulator.input.setLength(0)
+                        accumulator.input.append(input.toString())
+                    }
+                }
+            }
+
+            "content_block_delta" -> {
+                val index = chunk.optInt("index", contentBlocks.lastIndex.coerceAtLeast(0))
+                val delta = chunk.optJSONObject("delta") ?: return
+                when (delta.optString("type")) {
+                    "text_delta" -> {
+                        val textDelta = delta.optString("text")
+                        if (textDelta.isNotEmpty()) {
+                            assistantText.append(textDelta)
+                            mergeAnthropicTextDelta(index, textDelta)
+                            onTextDelta(textDelta)
+                        }
+                    }
+
+                    "input_json_delta" -> {
+                        val accumulator = toolUseBlocks.getOrPut(index) { MutableAnthropicToolUseAccumulator() }
+                        if (!accumulator.hasInputJsonDeltas) {
+                            accumulator.input.setLength(0)
+                            accumulator.hasInputJsonDeltas = true
+                        }
+                        accumulator.input.append(delta.optString("partial_json"))
+                    }
+                }
+            }
+
+            "content_block_stop" -> {
+                val index = chunk.optInt("index", contentBlocks.lastIndex.coerceAtLeast(0))
+                toolUseBlocks[index]?.let { accumulator ->
+                    contentBlocks[index] = JSONObject().apply {
+                        put("type", "tool_use")
+                        put("id", accumulator.id)
+                        put("name", accumulator.name)
+                        put("input", parseJsonValueSafe(accumulator.input.toString()))
+                    }
+                }
+            }
+        }
+    }
+
+    fun buildResult(): ChatCompletionResult {
+        val normalizedBlocks = JSONArray().apply {
+            contentBlocks.forEach { block ->
+                if (block.optString("type") == "text" && block.optString("text").isBlank()) return@forEach
+                put(block)
+            }
+        }
+        return buildAnthropicResultFromContent(
+            assistantText = assistantText.toString(),
+            content = normalizedBlocks,
+        )
+    }
+
+    private fun ensureContentBlock(index: Int, block: JSONObject): JSONObject {
+        while (contentBlocks.size <= index) {
+            contentBlocks += JSONObject()
+        }
+        contentBlocks[index] = JSONObject(block.toString())
+        return contentBlocks[index]
+    }
+
+    private fun mergeAnthropicTextDelta(
+        index: Int,
+        textDelta: String,
+    ) {
+        val block = if (index in contentBlocks.indices) {
+            contentBlocks[index]
+        } else {
+            ensureContentBlock(index, JSONObject().apply { put("type", "text") })
+        }
+        block.put("type", "text")
+        block.put("text", block.optString("text") + textDelta)
+    }
+}
+
 private class VertexStreamAccumulator(
     private val onTextDelta: suspend (String) -> Unit,
 ) {
@@ -1057,6 +1687,78 @@ private fun extractTextDelta(message: JSONObject): String =
 
         else -> ""
     }
+
+private fun buildOpenAiResponsesResult(output: JSONArray): ChatCompletionResult {
+    val assistantText = StringBuilder()
+    val toolCalls = mutableListOf<ChatCompletionToolCall>()
+    val assistantItems = JSONArray()
+
+    for (index in 0 until output.length()) {
+        val item = output.optJSONObject(index) ?: continue
+        when (item.optString("type")) {
+            "message" -> {
+                assistantItems.put(JSONObject(item.toString()))
+                val content = item.optJSONArray("content") ?: JSONArray()
+                for (contentIndex in 0 until content.length()) {
+                    val block = content.optJSONObject(contentIndex) ?: continue
+                    val text = when (block.optString("type")) {
+                        "output_text", "text" -> block.optString("text")
+                        else -> ""
+                    }
+                    if (text.isBlank()) continue
+                    if (assistantText.isNotEmpty()) assistantText.append('\n')
+                    assistantText.append(text)
+                }
+            }
+
+            "function_call" -> {
+                assistantItems.put(JSONObject(item.toString()))
+                toolCalls += ChatCompletionToolCall(
+                    id = item.optString("call_id")
+                        .ifBlank { item.optString("id") }
+                        .ifBlank { generatedToolCallId("responses", index) },
+                    name = item.optString("name"),
+                    arguments = item.optString("arguments").ifBlank { "{}" },
+                )
+            }
+        }
+    }
+
+    return ChatCompletionResult(
+        assistantText = assistantText.toString(),
+        toolCalls = toolCalls,
+        assistantMessage = JSONObject().apply {
+            put(OpenAiResponsesItemsKey, assistantItems)
+        },
+    )
+}
+
+private fun buildAnthropicResultFromContent(
+    assistantText: String,
+    content: JSONArray,
+): ChatCompletionResult {
+    val toolCalls = buildList {
+        for (index in 0 until content.length()) {
+            val block = content.optJSONObject(index) ?: continue
+            if (block.optString("type") != "tool_use") continue
+            add(
+                ChatCompletionToolCall(
+                    id = block.optString("id").ifBlank { generatedToolCallId("anthropic", index) },
+                    name = block.optString("name"),
+                    arguments = jsonValueToStringTopLevel(block.opt("input")),
+                )
+            )
+        }
+    }
+    return ChatCompletionResult(
+        assistantText = assistantText,
+        toolCalls = toolCalls,
+        assistantMessage = JSONObject().apply {
+            put("role", "assistant")
+            put("content", JSONArray(content.toString()))
+        },
+    )
+}
 
 private fun buildOpenAiAssistantMessage(
     assistantText: String,
@@ -1285,6 +1987,13 @@ private data class MutableToolCallAccumulator(
     val arguments: StringBuilder = StringBuilder(),
 )
 
+private data class MutableAnthropicToolUseAccumulator(
+    var id: String = "",
+    var name: String = "",
+    val input: StringBuilder = StringBuilder(),
+    var hasInputJsonDeltas: Boolean = false,
+)
+
 data class ChatCompletionResult(
     val assistantText: String,
     val toolCalls: List<ChatCompletionToolCall>,
@@ -1359,6 +2068,24 @@ private fun vertexChunkSignalsCompletion(chunk: JSONObject): Boolean {
     return chunk.has("promptFeedback")
 }
 
+private fun openAiResponsesChunkSignalsCompletion(chunk: JSONObject): Boolean =
+    chunk.optString("type") == "response.completed"
+
+private fun anthropicChunkSignalsCompletion(chunk: JSONObject): Boolean =
+    chunk.optString("type") == "message_stop"
+
+private fun parseJsonValueSafe(rawValue: String): Any = runCatching {
+    JSONTokener(rawValue.ifBlank { "{}" }).nextValue()
+}.getOrDefault(JSONObject())
+
+private fun jsonValueToStringTopLevel(value: Any?): String = when (value) {
+    null -> "{}"
+    JSONObject.NULL -> "null"
+    is JSONObject -> value.toString()
+    is JSONArray -> value.toString()
+    else -> JSONObject.wrap(value)?.toString() ?: value.toString()
+}
+
 private val RetryAfterMessageRegex = Regex(
     "try again in\\s+(\\d+(?:\\.\\d+)?)\\s*(milliseconds?|ms|seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)",
     RegexOption.IGNORE_CASE,
@@ -1370,6 +2097,9 @@ private const val DefaultHttpWriteTimeoutMillis = 30_000L
 private const val DefaultHttpCallTimeoutMillis = 90_000L
 private const val DefaultStreamingConnectTimeoutMillis = 30_000L
 private const val DefaultStreamingWriteTimeoutMillis = 30_000L
+private const val DefaultAnthropicMaxTokens = 4096
+private const val AnthropicVersion = "2023-06-01"
+private const val OpenAiResponsesItemsKey = "aether_response_items"
 
 sealed interface LlmContentPart
 

@@ -11,9 +11,15 @@ enum class LlmProvider(
     val defaultBaseUrl: String,
     val defaultModelId: String,
 ) {
+    OpenAiResponses(
+        storageValue = "openai_responses",
+        displayName = "OpenAI (Responses)",
+        defaultBaseUrl = "https://api.openai.com/v1",
+        defaultModelId = "gpt-5.4",
+    ),
     OpenAiCompatible(
         storageValue = "openai_compatible",
-        displayName = "OpenAI format",
+        displayName = "OpenAI (Chat Completions)",
         defaultBaseUrl = "https://api.openai.com/v1",
         defaultModelId = "gpt-5.4",
     ),
@@ -22,6 +28,12 @@ enum class LlmProvider(
         displayName = "Vertex AI (Express Mode)",
         defaultBaseUrl = "https://aiplatform.googleapis.com/v1",
         defaultModelId = "gemini-2.5-flash",
+    ),
+    AnthropicMessages(
+        storageValue = "anthropic_messages",
+        displayName = "Anthropic Messages API",
+        defaultBaseUrl = "https://api.anthropic.com/v1",
+        defaultModelId = "claude-sonnet-4-5",
     );
 
     companion object {
@@ -99,8 +111,13 @@ data class AppSettings(
     val agentModeAuthorizationMethod: AgentModeAuthorizationMethod = AgentModeAuthorizationMethod.Shizuku,
     val language: AppLanguage = defaultAppLanguage(),
     val themeMode: AppThemeMode = AppThemeMode.Light,
+    val defaultChatModelKey: String = "",
+    val defaultTitleModelKey: String = "",
+    val defaultNamingModelKey: String = "",
     val onboardingSeenVersion: Int = 0,
     val onboardingCompletedVersion: Int = 0,
+    val privacyPolicyAccepted: Boolean = false,
+    val lastUpdateCheckAtMillis: Long = 0L,
 )
 
 const val CurrentOnboardingVersion = 1
@@ -108,6 +125,8 @@ const val DefaultLlmInactivityReconnectTimeoutSeconds = 360
 private const val MinLlmInactivityReconnectTimeoutSeconds = 30
 private const val MaxLlmInactivityReconnectTimeoutSeconds = 3600
 const val OnboardingStarterPrompt = "Hi"
+const val AetherWebsiteUrl = "https://github.com/Zhou-Shilin"
+const val AetherPrivacyPolicyUrl = "https://github.com/Zhou-Shilin/Aether/wiki/Privacy-Policy"
 
 fun defaultAppLanguage(
     locale: Locale = Locale.getDefault(),
@@ -142,9 +161,12 @@ fun isProviderSetupValid(
     modelId: String,
 ): Boolean {
     if (baseUrl.trim().isEmpty() || modelId.trim().isEmpty()) return false
-    if (provider == LlmProvider.VertexExpress && apiKey.trim().isEmpty()) return false
+    if (provider.requiresApiKey && apiKey.trim().isEmpty()) return false
     return true
 }
+
+val LlmProvider.requiresApiKey: Boolean
+    get() = this == LlmProvider.VertexExpress || this == LlmProvider.AnthropicMessages
 
 fun shouldShowResumeSetupBanner(
     settings: AppSettings,
@@ -172,26 +194,30 @@ fun shouldRevealFollowUpTourCard(
 
 data class LlmProviderConfig(
     val id: String = UUID.randomUUID().toString(),
+    val providerId: String,
     val name: String,
     val providerType: LlmProvider,
     val apiKey: String,
     val baseUrl: String,
     val modelId: String,
-    val cachedModels: List<String> = emptyList(),
-    val isActive: Boolean = false,
+    val cachedModels: List<String> = listOf(modelId),
+    val enabledModelIds: List<String> = cachedModels,
+    val isEnabled: Boolean = true,
     val createdAtMillis: Long = System.currentTimeMillis(),
     val updatedAtMillis: Long = createdAtMillis,
 )
 
 internal fun LlmProviderConfig.toJson(): JSONObject = JSONObject().apply {
     put("id", id)
+    put("providerId", providerId)
     put("name", name)
     put("providerType", providerType.storageValue)
     put("apiKey", apiKey)
     put("baseUrl", baseUrl)
     put("modelId", modelId)
     put("cachedModels", JSONArray().apply { cachedModels.forEach(::put) })
-    put("isActive", isActive)
+    put("enabledModelIds", JSONArray().apply { enabledModelIds.forEach(::put) })
+    put("isEnabled", isEnabled)
     put("createdAtMillis", createdAtMillis)
     put("updatedAtMillis", updatedAtMillis)
 }
@@ -203,16 +229,39 @@ internal fun parseProviderConfigs(rawValue: String): List<LlmProviderConfig> {
         buildList {
             for (index in 0 until array.length()) {
                 val json = array.optJSONObject(index) ?: continue
+                val providerType = LlmProvider.fromStorage(json.optString("providerType"))
+                val modelId = json.optString("modelId").ifBlank { providerType.defaultModelId }
+                val enabledModelIds = json.optJSONArray("enabledModelIds").toStringListSafe()
+                val cachedModels = normalizeStringList(
+                    buildList {
+                        addAll(json.optJSONArray("cachedModels").toStringListSafe())
+                        add(modelId)
+                        addAll(enabledModelIds)
+                    }
+                )
+                val inferredProviderId = json.optString("name")
+                    .sanitizeProviderId()
+                    .ifBlank { "${providerType.storageValue}_${index + 1}" }
                 add(
                     LlmProviderConfig(
                         id = json.optString("id").ifBlank { UUID.randomUUID().toString() },
+                        providerId = json.optString("providerId").ifBlank { inferredProviderId },
                         name = json.optString("name"),
-                        providerType = LlmProvider.fromStorage(json.optString("providerType")),
+                        providerType = providerType,
                         apiKey = json.optString("apiKey"),
                         baseUrl = json.optString("baseUrl"),
-                        modelId = json.optString("modelId"),
-                        cachedModels = json.optJSONArray("cachedModels").toStringListSafe(),
-                        isActive = json.optBoolean("isActive", false),
+                        modelId = modelId,
+                        cachedModels = cachedModels,
+                        enabledModelIds = if (json.has("enabledModelIds")) {
+                            normalizeStringList(enabledModelIds.filter(cachedModels::contains))
+                        } else {
+                            cachedModels
+                        },
+                        isEnabled = if (json.has("isEnabled")) {
+                            json.optBoolean("isEnabled", true)
+                        } else {
+                            true
+                        },
                         createdAtMillis = json.optLong("createdAtMillis", System.currentTimeMillis()),
                         updatedAtMillis = json.optLong("updatedAtMillis", System.currentTimeMillis()),
                     )
@@ -227,12 +276,146 @@ internal fun serializeProviderConfigs(configs: List<LlmProviderConfig>): String 
 
 private fun JSONArray?.toStringListSafe(): List<String> {
     if (this == null) return emptyList()
-    return buildList {
-        for (index in 0 until length()) {
-            val value = optString(index).trim()
-            if (value.isNotEmpty()) {
-                add(value)
+    return normalizeStringList(
+        buildList {
+            for (index in 0 until length()) {
+                val value = optString(index).trim()
+                if (value.isNotEmpty()) {
+                    add(value)
+                }
             }
+        }
+    )
+}
+
+private fun normalizeStringList(values: List<String>): List<String> =
+    values
+        .map(String::trim)
+        .filter(String::isNotEmpty)
+        .distinct()
+
+private val ProviderIdPattern = Regex("^[a-z0-9_]+$")
+
+fun isValidProviderId(value: String): Boolean = ProviderIdPattern.matches(value.trim())
+
+fun String.sanitizeProviderId(): String =
+    lowercase(Locale.US)
+        .replace(Regex("[^a-z0-9_]+"), "_")
+        .trim('_')
+
+fun buildModelOptionKey(
+    providerConfigId: String,
+    modelId: String,
+): String = "$providerConfigId::$modelId"
+
+fun LlmProviderConfig.availableModels(): List<String> = normalizeStringList(cachedModels + modelId)
+
+fun LlmProviderConfig.enabledModels(): List<String> = normalizeStringList(
+    enabledModelIds.filter { availableModels().contains(it) }
+)
+
+data class ProviderModelOption(
+    val key: String,
+    val providerConfigId: String,
+    val providerId: String,
+    val providerName: String,
+    val providerType: LlmProvider,
+    val apiKey: String,
+    val baseUrl: String,
+    val modelId: String,
+    val fullLabel: String,
+    val chatLabel: String,
+)
+
+enum class AutomaticModelPurpose {
+    Chat,
+    Title,
+    Naming,
+}
+
+fun List<LlmProviderConfig>.availableModelOptions(
+    includeDisabledProviders: Boolean = false,
+    includeDisabledModels: Boolean = false,
+): List<ProviderModelOption> {
+    val scopedConfigs = if (includeDisabledProviders) this else filter { it.isEnabled }
+    val modelCounts = scopedConfigs
+        .flatMap { config ->
+            val models = if (includeDisabledModels) config.availableModels() else config.enabledModels()
+            models.map { modelId -> modelId to config.id }
+        }
+        .groupingBy { it.first }
+        .eachCount()
+
+    return scopedConfigs.flatMap { config ->
+        val models = if (includeDisabledModels) config.availableModels() else config.enabledModels()
+        models.map { modelId ->
+            val fullLabel = "${config.providerId}/$modelId"
+            ProviderModelOption(
+                key = buildModelOptionKey(config.id, modelId),
+                providerConfigId = config.id,
+                providerId = config.providerId,
+                providerName = config.name,
+                providerType = config.providerType,
+                apiKey = config.apiKey,
+                baseUrl = config.baseUrl,
+                modelId = modelId,
+                fullLabel = fullLabel,
+                chatLabel = if ((modelCounts[modelId] ?: 0) > 1) fullLabel else modelId,
+            )
+        }
+    }.sortedWith(compareBy(ProviderModelOption::providerId, ProviderModelOption::modelId))
+}
+
+fun AppSettings.withModelOption(option: ProviderModelOption): AppSettings = copy(
+    provider = option.providerType,
+    apiKey = option.apiKey.trim(),
+    baseUrl = option.baseUrl.trim(),
+    modelId = option.modelId.trim(),
+)
+
+fun List<ProviderModelOption>.findModelOption(key: String?): ProviderModelOption? =
+    firstOrNull { it.key == key }
+
+fun List<ProviderModelOption>.resolveAutomaticModelKey(
+    purpose: AutomaticModelPurpose,
+): String {
+    if (isEmpty()) return ""
+    val rankedOption = mapNotNull { option ->
+        automaticModelPriority(option.modelId, purpose)?.let { priority -> option to priority }
+    }
+        .minWithOrNull(compareBy<Pair<ProviderModelOption, Int>> { it.second }.thenBy { it.first.providerId }.thenBy { it.first.modelId })
+        ?.first
+    return rankedOption?.key ?: firstOrNull()?.key.orEmpty()
+}
+
+private fun automaticModelPriority(
+    modelId: String,
+    purpose: AutomaticModelPurpose,
+): Int? {
+    val normalized = modelId.lowercase(Locale.US).replace(Regex("[^a-z0-9]+"), "")
+    val isGemini31Pro = normalized.contains("gemini31pro")
+    val isGemini3Flash = Regex("gemini3(?:0)?flash").containsMatchIn(normalized) ||
+        normalized.contains("gemini3flashpreview")
+    val isGemini31FlashLite = normalized.contains("gemini31flashlite")
+
+    return when (purpose) {
+        AutomaticModelPurpose.Chat -> when {
+            normalized.contains("gpt55") -> 0
+            normalized.contains("gpt54") -> 1
+            normalized.contains("claude") && normalized.contains("opus") && normalized.contains("47") -> 2
+            normalized.contains("claude") && normalized.contains("sonnet") && normalized.contains("46") -> 3
+            isGemini31Pro -> 4
+            isGemini3Flash -> 5
+            else -> null
+        }
+
+        AutomaticModelPurpose.Title,
+        AutomaticModelPurpose.Naming -> when {
+            isGemini3Flash -> 0
+            isGemini31FlashLite -> 1
+            normalized.contains("gpt54mini") -> 2
+            normalized.contains("claude") && normalized.contains("haiku") && normalized.contains("46") -> 3
+            else -> null
         }
     }
 }

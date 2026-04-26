@@ -6,8 +6,12 @@ import android.os.SystemClock
 import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.zhousl.aether.BuildConfig
 import com.zhousl.aether.aetherRuntime
 import com.zhousl.aether.data.ActiveSkillContext
+import com.zhousl.aether.data.AppUpdateManager
+import com.zhousl.aether.data.AppUpdateRelease
+import com.zhousl.aether.data.AutomaticModelPurpose
 import com.zhousl.aether.data.AgentModeDisplayState
 import com.zhousl.aether.data.AgentModeAuthorizationMethod
 import com.zhousl.aether.data.AgentExtensionsRepository
@@ -24,6 +28,9 @@ import com.zhousl.aether.data.LlmMessage
 import com.zhousl.aether.data.LlmTextPart
 import com.zhousl.aether.data.LlmProvider
 import com.zhousl.aether.data.LlmProviderConfig
+import com.zhousl.aether.data.ProviderModelOption
+import com.zhousl.aether.data.availableModelOptions
+import com.zhousl.aether.data.findModelOption
 import com.zhousl.aether.data.McpClientManager
 import com.zhousl.aether.data.McpServerConfig
 import com.zhousl.aether.data.normalizeLlmInactivityReconnectTimeoutSeconds
@@ -41,16 +48,20 @@ import com.zhousl.aether.data.parseChatSessions
 import com.zhousl.aether.data.parseInstalledSkills
 import com.zhousl.aether.data.parseMcpServerConfigs
 import com.zhousl.aether.data.parseProviderConfigs
+import com.zhousl.aether.data.requiresApiKey
 import com.zhousl.aether.data.serializeChatSessions
 import com.zhousl.aether.data.serializeInstalledSkills
 import com.zhousl.aether.data.serializeMcpServerConfigs
 import com.zhousl.aether.data.serializeProviderConfigs
 import com.zhousl.aether.data.toJson
 import com.zhousl.aether.data.isProviderSetupValid
+import com.zhousl.aether.data.isVersionNewer
 import com.zhousl.aether.data.isOnboardingComplete
 import com.zhousl.aether.data.shouldMarkOnboardingCompleted
 import com.zhousl.aether.data.shouldLaunchOnboarding
 import com.zhousl.aether.data.shouldRevealFollowUpTourCard
+import com.zhousl.aether.data.resolveAutomaticModelKey
+import com.zhousl.aether.data.withModelOption
 import com.zhousl.aether.termux.TermuxBashTool
 import com.zhousl.aether.termux.TermuxSetupState
 import kotlin.coroutines.coroutineContext
@@ -71,6 +82,7 @@ import org.json.JSONObject
 
 private const val DraftSessionId = "draft"
 private const val FollowUpTourAutoOpenDelayMillis = 2_500L
+private const val AppUpdateCheckIntervalMillis = 3L * 24L * 60L * 60L * 1000L
 private const val SessionTitleSystemPrompt =
     "Generate a concise chat title for this conversation. Return only the title, in the user's language when possible, with no quotes, no emoji, and at most 6 words."
 
@@ -183,6 +195,16 @@ data class ChatSession(
     val activeSkills: List<ActiveSkillContext> = emptyList(),
     val activeMcpServerIds: List<String> = emptyList(),
     val agentModeEnabled: Boolean = false,
+    val selectedModelKey: String = "",
+)
+
+data class AppUpdateUiState(
+    val isChecking: Boolean = false,
+    val isDownloading: Boolean = false,
+    val downloadProgress: Float? = null,
+    val availableRelease: AppUpdateRelease? = null,
+    val showAvailableDialog: Boolean = false,
+    val pendingInstallUri: String = "",
 )
 
 data class AetherUiState(
@@ -195,6 +217,7 @@ data class AetherUiState(
     val currentSessionId: String = DraftSessionId,
     val draftInput: String = "",
     val draftAttachments: List<ChatAttachment> = emptyList(),
+    val draftSelectedModelKey: String = "",
     val draftSelectedSkillIds: List<String> = emptyList(),
     val draftSelectedMcpServerIds: List<String> = emptyList(),
     val draftAgentModeEnabled: Boolean = false,
@@ -219,6 +242,7 @@ data class AetherUiState(
     val awaitingFollowUpTour: Boolean = false,
     val showFollowUpTourCard: Boolean = false,
     val agentModeDisplayState: AgentModeDisplayState = AgentModeDisplayState(),
+    val appUpdate: AppUpdateUiState = AppUpdateUiState(),
 )
 
 class AetherViewModel(
@@ -236,6 +260,7 @@ class AetherViewModel(
     private val skillManager = runtime.skillManager
     private val mcpClientManager = McpClientManager(bashTool = bashTool)
     private val webToolsClient = runtime.webToolsClient
+    private val appUpdateManager = AppUpdateManager(application.applicationContext)
     private val agent = AetherAgent(
         client = client,
         bashTool = bashTool,
@@ -248,6 +273,7 @@ class AetherViewModel(
     private var activeGenerationJob: Job? = null
     private var activeGenerationRequestId: Long? = null
     private var activeGenerationStartedAtMillis: Long? = null
+    private var didEvaluateStartupUpdateCheck = false
     private val _uiState = MutableStateFlow(AetherUiState())
     private val _transientMessages = MutableSharedFlow<String>(extraBufferCapacity = 4)
 
@@ -259,6 +285,9 @@ class AetherViewModel(
 
         viewModelScope.launch {
             settingsRepository.settings.collect { settings ->
+                if (settings.privacyPolicyAccepted) {
+                    runtime.initializePostHog()
+                }
                 _uiState.update { current ->
                     if (!current.isStartupRouteResolved) {
                         current.copy(
@@ -276,6 +305,10 @@ class AetherViewModel(
                     } else {
                         current.copy(settings = settings)
                     }
+                }
+                if (!didEvaluateStartupUpdateCheck && settings.privacyPolicyAccepted) {
+                    didEvaluateStartupUpdateCheck = true
+                    maybeCheckForUpdates(settings)
                 }
             }
         }
@@ -388,10 +421,92 @@ class AetherViewModel(
         }
     }
 
+    fun acceptPrivacyPolicy() {
+        viewModelScope.launch {
+            settingsRepository.updatePrivacyPolicyAccepted(true)
+            runtime.initializePostHog()
+        }
+    }
+
     fun refreshTermuxSetup() {
         viewModelScope.launch {
             val setupState = withContext(Dispatchers.IO) { bashTool.inspectSetup() }
             _uiState.update { current -> current.copy(termuxSetupState = setupState) }
+        }
+    }
+
+    fun checkForUpdates() {
+        checkForUpdates(manual = true, forceAvailable = false)
+    }
+
+    fun forceUpdateCheckForTesting() {
+        checkForUpdates(manual = true, forceAvailable = true)
+    }
+
+    fun dismissUpdateAvailableDialog() {
+        _uiState.update { current ->
+            current.copy(
+                appUpdate = current.appUpdate.copy(showAvailableDialog = false)
+            )
+        }
+    }
+
+    fun downloadAndInstallUpdate() {
+        val release = _uiState.value.appUpdate.availableRelease ?: return
+        if (_uiState.value.appUpdate.isDownloading) return
+
+        _uiState.update { current ->
+            current.copy(
+                appUpdate = current.appUpdate.copy(
+                    isDownloading = true,
+                    downloadProgress = null,
+                )
+            )
+        }
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    appUpdateManager.downloadApk(release) { progress ->
+                        _uiState.update { current ->
+                            current.copy(
+                                appUpdate = current.appUpdate.copy(downloadProgress = progress)
+                            )
+                        }
+                    }
+                }
+            }
+            result
+                .onSuccess { installUri ->
+                    _uiState.update { current ->
+                        current.copy(
+                            appUpdate = current.appUpdate.copy(
+                                isDownloading = false,
+                                downloadProgress = null,
+                                pendingInstallUri = installUri.toString(),
+                                showAvailableDialog = false,
+                            )
+                        )
+                    }
+                }
+                .onFailure { throwable ->
+                    _uiState.update { current ->
+                        current.copy(
+                            appUpdate = current.appUpdate.copy(
+                                isDownloading = false,
+                                downloadProgress = null,
+                            )
+                        )
+                    }
+                    emitTransientMessage("Couldn't download update: ${throwable.userFacingMessage()}")
+                }
+        }
+    }
+
+    fun consumePendingUpdateInstallUri() {
+        _uiState.update { current ->
+            current.copy(
+                appUpdate = current.appUpdate.copy(pendingInstallUri = "")
+            )
         }
     }
 
@@ -483,9 +598,12 @@ class AetherViewModel(
 
     fun completeOnboardingProviderSetup(config: LlmProviderConfig) {
         viewModelScope.launch {
-            val activeConfig = config.copy(isActive = true)
-            settingsRepository.upsertProviderConfig(activeConfig)
-            settingsRepository.setActiveProvider(activeConfig.id)
+            val enabledConfig = config.copy(isEnabled = true)
+            settingsRepository.upsertProviderConfig(enabledConfig)
+            settingsRepository.setProviderEnabled(enabledConfig.id, true)
+            val defaultModelKey = listOf(enabledConfig)
+                .availableModelOptions()
+                .resolveAutomaticModelKey(AutomaticModelPurpose.Chat)
             settingsRepository.updateOnboardingSeenVersion(CurrentOnboardingVersion)
             _uiState.update { current ->
                 current.copy(
@@ -497,6 +615,7 @@ class AetherViewModel(
                     currentSessionId = DraftSessionId,
                     draftInput = OnboardingStarterPrompt,
                     draftAttachments = emptyList(),
+                    draftSelectedModelKey = defaultModelKey,
                     draftSelectedSkillIds = emptyList(),
                     draftSelectedMcpServerIds = emptyList(),
                     draftAgentModeEnabled = false,
@@ -637,6 +756,7 @@ class AetherViewModel(
                 currentSessionId = DraftSessionId,
                 draftInput = "",
                 draftAttachments = emptyList(),
+                draftSelectedModelKey = resolveDefaultChatModelKey(it.settings, it.providerConfigs),
                 draftSelectedSkillIds = emptyList(),
                 draftSelectedMcpServerIds = emptyList(),
                 draftAgentModeEnabled = false,
@@ -657,6 +777,7 @@ class AetherViewModel(
                 currentSessionId = sessionId,
                 draftInput = "",
                 draftAttachments = emptyList(),
+                draftSelectedModelKey = "",
                 draftSelectedSkillIds = emptyList(),
                 draftSelectedMcpServerIds = emptyList(),
                 draftAgentModeEnabled = false,
@@ -778,6 +899,7 @@ class AetherViewModel(
                             currentSessionId = imported.currentSessionId,
                             draftInput = "",
                             draftAttachments = emptyList(),
+                            draftSelectedModelKey = "",
                             draftSelectedSkillIds = emptyList(),
                             draftSelectedMcpServerIds = emptyList(),
                             draftAgentModeEnabled = false,
@@ -812,6 +934,13 @@ class AetherViewModel(
                 currentSessionId = sessionId,
                 draftInput = message.text,
                 draftAttachments = message.attachments.map(::normalizeDraftAttachmentForEditing),
+                draftSelectedModelKey = if (sessionId == DraftSessionId) {
+                    it.draftSelectedModelKey.ifBlank {
+                        resolveDefaultChatModelKey(it.settings, it.providerConfigs)
+                    }
+                } else {
+                    it.draftSelectedModelKey
+                },
                 draftWorkspaceId = sessionId,
                 editingSessionId = sessionId,
                 editingMessageId = messageId,
@@ -826,6 +955,13 @@ class AetherViewModel(
             it.copy(
                 draftInput = "",
                 draftAttachments = emptyList(),
+                draftSelectedModelKey = if (it.currentSessionId == DraftSessionId) {
+                    it.draftSelectedModelKey.ifBlank {
+                        resolveDefaultChatModelKey(it.settings, it.providerConfigs)
+                    }
+                } else {
+                    it.draftSelectedModelKey
+                },
                 draftSelectedSkillIds = emptyList(),
                 draftSelectedMcpServerIds = emptyList(),
                 draftAgentModeEnabled = false,
@@ -933,7 +1069,12 @@ class AetherViewModel(
 
             request = SessionTurnRequest(
                 sessionId = sessionId,
-                settings = snapshot.settings,
+                settings = resolveModelSettings(
+                    baseSettings = snapshot.settings,
+                    providerConfigs = snapshot.providerConfigs,
+                    preferredModelKey = session.selectedModelKey,
+                    fallbackModelKey = resolveDefaultChatModelKey(snapshot.settings, snapshot.providerConfigs),
+                ),
                 requestMessages = trimmedMessages,
                 selectedSkillIds = session.selectedSkillIds,
                 activeSkills = session.activeSkills,
@@ -998,7 +1139,12 @@ class AetherViewModel(
 
             request = SessionTurnRequest(
                 sessionId = sessionId,
-                settings = snapshot.settings,
+                settings = resolveModelSettings(
+                    baseSettings = snapshot.settings,
+                    providerConfigs = snapshot.providerConfigs,
+                    preferredModelKey = updatedSession.selectedModelKey,
+                    fallbackModelKey = resolveDefaultChatModelKey(snapshot.settings, snapshot.providerConfigs),
+                ),
                 requestMessages = updatedSession.messages,
                 selectedSkillIds = updatedSession.selectedSkillIds,
                 activeSkills = updatedSession.activeSkills,
@@ -1067,14 +1213,35 @@ class AetherViewModel(
         agentModeAuthorizationMethod: AgentModeAuthorizationMethod,
         language: AppLanguage,
         themeMode: AppThemeMode,
+        defaultChatModelKey: String,
+        defaultTitleModelKey: String,
+        defaultNamingModelKey: String,
     ) {
         viewModelScope.launch {
-            settingsRepository.updateSettings(
-                AppSettings(
+            val currentState = _uiState.value
+            val modelOptions = currentState.providerConfigs.availableModelOptions()
+            val resolvedDefaultChatModelKey = resolveStoredOrAutomaticModelKey(
+                modelKey = defaultChatModelKey,
+                options = modelOptions,
+                purpose = AutomaticModelPurpose.Chat,
+            )
+            val compatibilitySettings = resolveModelSettings(
+                baseSettings = currentState.settings.copy(
                     provider = provider,
                     apiKey = apiKey.trim(),
                     baseUrl = baseUrl.trim(),
                     modelId = modelId.trim(),
+                ),
+                providerConfigs = currentState.providerConfigs,
+                preferredModelKey = resolvedDefaultChatModelKey,
+                fallbackModelKey = resolvedDefaultChatModelKey,
+            )
+            settingsRepository.updateSettings(
+                currentState.settings.copy(
+                    provider = compatibilitySettings.provider,
+                    apiKey = compatibilitySettings.apiKey,
+                    baseUrl = compatibilitySettings.baseUrl,
+                    modelId = compatibilitySettings.modelId,
                     systemPrompt = systemPrompt,
                     tavilyApiKey = tavilyApiKey.trim(),
                     llmInactivityReconnectTimeoutSeconds =
@@ -1087,6 +1254,9 @@ class AetherViewModel(
                     agentModeAuthorizationMethod = agentModeAuthorizationMethod,
                     language = language,
                     themeMode = themeMode,
+                    defaultChatModelKey = normalizeSelectableModelKey(defaultChatModelKey, modelOptions),
+                    defaultTitleModelKey = normalizeSelectableModelKey(defaultTitleModelKey, modelOptions),
+                    defaultNamingModelKey = normalizeSelectableModelKey(defaultNamingModelKey, modelOptions),
                 )
             )
         }
@@ -1108,7 +1278,7 @@ class AetherViewModel(
 
     fun upsertProviderConfig(config: LlmProviderConfig) {
         viewModelScope.launch {
-            settingsRepository.upsertProviderConfig(config)
+            settingsRepository.upsertProviderConfig(normalizeProviderConfig(config))
         }
     }
 
@@ -1118,9 +1288,36 @@ class AetherViewModel(
         }
     }
 
-    fun setActiveProvider(id: String) {
+    fun setProviderEnabled(
+        id: String,
+        enabled: Boolean,
+    ) {
         viewModelScope.launch {
-            settingsRepository.setActiveProvider(id)
+            settingsRepository.setProviderEnabled(id, enabled)
+        }
+    }
+
+    fun setCurrentChatModelSelection(modelKey: String) {
+        var didUpdate = false
+        _uiState.update { current ->
+            if (current.currentSessionId == DraftSessionId) {
+                if (current.draftSelectedModelKey == modelKey) return@update current
+                didUpdate = true
+                current.copy(draftSelectedModelKey = modelKey)
+            } else {
+                val sessionIndex = current.sessions.indexOfFirst { it.id == current.currentSessionId }
+                if (sessionIndex < 0) return@update current
+                val session = current.sessions[sessionIndex]
+                if (session.selectedModelKey == modelKey) return@update current
+                val updatedSessions = current.sessions.toMutableList().apply {
+                    set(sessionIndex, session.copy(selectedModelKey = modelKey))
+                }
+                didUpdate = true
+                current.copy(sessions = updatedSessions)
+            }
+        }
+        if (didUpdate) {
+            persistChats()
         }
     }
 
@@ -1133,13 +1330,44 @@ class AetherViewModel(
             val result = LlmApiClient.fetchModels(config)
             _uiState.update { it.copy(isFetchingModels = false) }
             if (result.models.isNotEmpty()) {
-                settingsRepository.updateProviderCachedModels(config.id, result.models)
+                settingsRepository.upsertProviderConfig(
+                    mergeFetchedModels(
+                        current = config,
+                        fetchedModels = result.models,
+                    )
+                )
             }
             onComplete(result.models)
             if (result.error != null) {
                 _transientMessages.emit("Failed to fetch models: ${result.error}")
             }
         }
+    }
+
+    private fun mergeFetchedModels(
+        current: LlmProviderConfig,
+        fetchedModels: List<String>,
+    ): LlmProviderConfig {
+        val normalizedCurrent = normalizeProviderConfig(current)
+        val previousModels = normalizedCurrent.cachedModels.toSet()
+        val normalizedFetched = fetchedModels
+            .map(String::trim)
+            .filter(String::isNotEmpty)
+            .distinct()
+        val enabledModels = normalizedFetched.filter { modelId ->
+            normalizedCurrent.enabledModelIds.contains(modelId) || !previousModels.contains(modelId)
+        }
+        return normalizeProviderConfig(
+            normalizedCurrent.copy(
+                modelId = when {
+                    normalizedCurrent.modelId in normalizedFetched -> normalizedCurrent.modelId
+                    normalizedFetched.isNotEmpty() -> normalizedFetched.first()
+                    else -> normalizedCurrent.modelId
+                },
+                cachedModels = normalizedFetched,
+                enabledModelIds = enabledModels,
+            )
+        )
     }
 
     fun installSkillFromDirectory(treeUri: Uri) {
@@ -1482,6 +1710,7 @@ class AetherViewModel(
         var requestActiveSkills: List<ActiveSkillContext> = emptyList()
         var requestActiveMcpServerIds: List<String> = emptyList()
         var requestAgentModeEnabled = false
+        var requestModelKey = ""
         var shouldGenerateSessionTitle = false
 
         _uiState.update { current ->
@@ -1512,6 +1741,7 @@ class AetherViewModel(
                         requestActiveSkills = updated.activeSkills
                         requestActiveMcpServerIds = updated.activeMcpServerIds
                         requestAgentModeEnabled = updated.agentModeEnabled
+                        requestModelKey = updated.selectedModelKey
                     } else {
                         updatedSessions.add(editingSessionIndex, editingSession)
                     }
@@ -1529,12 +1759,16 @@ class AetherViewModel(
                     requestActiveSkills = updated.activeSkills
                     requestActiveMcpServerIds = updated.activeMcpServerIds
                     requestAgentModeEnabled = updated.agentModeEnabled
+                    requestModelKey = updated.selectedModelKey
                 } else {
                     val newSession = createSession(
                         id = targetSessionId,
                         messages = listOf(userMessage),
                         title = "New chat",
                         hasCustomTitle = true,
+                        selectedModelKey = current.draftSelectedModelKey.ifBlank {
+                            resolveDefaultChatModelKey(current.settings, current.providerConfigs)
+                        },
                         selectedSkillIds = current.draftSelectedSkillIds,
                         activeMcpServerIds = current.draftSelectedMcpServerIds,
                         agentModeEnabled = current.draftAgentModeEnabled,
@@ -1546,12 +1780,18 @@ class AetherViewModel(
                     requestActiveSkills = newSession.activeSkills
                     requestActiveMcpServerIds = newSession.activeMcpServerIds
                     requestAgentModeEnabled = newSession.agentModeEnabled
+                    requestModelKey = newSession.selectedModelKey
                 }
             }
 
             request = SessionTurnRequest(
                 sessionId = targetSessionId,
-                settings = current.settings,
+                settings = resolveModelSettings(
+                    baseSettings = current.settings,
+                    providerConfigs = current.providerConfigs,
+                    preferredModelKey = requestModelKey,
+                    fallbackModelKey = resolveDefaultChatModelKey(current.settings, current.providerConfigs),
+                ),
                 requestMessages = requestMessages,
                 selectedSkillIds = requestSelectedSkillIds,
                 activeSkills = requestActiveSkills,
@@ -1564,6 +1804,7 @@ class AetherViewModel(
                 currentSessionId = targetSessionId,
                 draftInput = "",
                 draftAttachments = emptyList(),
+                draftSelectedModelKey = "",
                 draftSelectedSkillIds = emptyList(),
                 draftSelectedMcpServerIds = emptyList(),
                 draftAgentModeEnabled = false,
@@ -1627,10 +1868,10 @@ class AetherViewModel(
         activeSkills: List<ActiveSkillContext>,
         activeMcpServerIds: List<String>,
     ) {
-        if (settings.provider == LlmProvider.VertexExpress && settings.apiKey.isBlank()) {
+        if (settings.provider.requiresApiKey && settings.apiKey.isBlank()) {
             appendAgentMessage(
                 sessionId = sessionId,
-                text = "API Key is required before sending with Vertex AI (Express Mode).",
+                text = "API Key is required before sending with ${settings.provider.displayName}.",
                 outcome = AssistantResponseOutcome.ValidationError,
             )
             return
@@ -2046,11 +2287,94 @@ class AetherViewModel(
         }
     }
 
+    private fun normalizeSelectableModelKey(
+        modelKey: String,
+        options: List<ProviderModelOption>,
+    ): String = if (options.any { it.key == modelKey }) modelKey else ""
+
+    private fun resolveStoredOrAutomaticModelKey(
+        modelKey: String,
+        options: List<ProviderModelOption>,
+        purpose: AutomaticModelPurpose,
+        fallbackPurpose: AutomaticModelPurpose? = null,
+    ): String = normalizeSelectableModelKey(modelKey, options)
+        .ifBlank {
+            options.resolveAutomaticModelKey(purpose).ifBlank {
+                fallbackPurpose?.let(options::resolveAutomaticModelKey).orEmpty()
+            }
+        }
+
+    private fun resolveDefaultChatModelKey(
+        settings: AppSettings,
+        providerConfigs: List<LlmProviderConfig>,
+    ): String {
+        val options = providerConfigs.availableModelOptions()
+        return resolveStoredOrAutomaticModelKey(
+            modelKey = settings.defaultChatModelKey,
+            options = options,
+            purpose = AutomaticModelPurpose.Chat,
+        )
+    }
+
+    private fun resolveDefaultTitleModelKey(
+        settings: AppSettings,
+        providerConfigs: List<LlmProviderConfig>,
+    ): String {
+        val options = providerConfigs.availableModelOptions()
+        return resolveStoredOrAutomaticModelKey(
+            modelKey = settings.defaultTitleModelKey,
+            options = options,
+            purpose = AutomaticModelPurpose.Title,
+            fallbackPurpose = AutomaticModelPurpose.Chat,
+        )
+    }
+
+    private fun resolveModelSettings(
+        baseSettings: AppSettings,
+        providerConfigs: List<LlmProviderConfig>,
+        preferredModelKey: String,
+        fallbackModelKey: String,
+    ): AppSettings {
+        val options = providerConfigs.availableModelOptions()
+        val selectedOption = options.findModelOption(preferredModelKey)
+            ?: options.findModelOption(fallbackModelKey)
+            ?: options.firstOrNull()
+        return selectedOption?.let(baseSettings::withModelOption) ?: baseSettings
+    }
+
+    private fun normalizeProviderConfig(
+        config: LlmProviderConfig,
+    ): LlmProviderConfig {
+        val models = (config.cachedModels + config.enabledModelIds + config.modelId)
+            .map(String::trim)
+            .filter(String::isNotEmpty)
+            .distinct()
+        val normalizedModelId = config.modelId.trim().ifBlank {
+            models.firstOrNull() ?: config.providerType.defaultModelId
+        }
+        val normalizedModels = (models + normalizedModelId)
+            .map(String::trim)
+            .filter(String::isNotEmpty)
+            .distinct()
+        val normalizedEnabledModels = config.enabledModelIds
+            .map(String::trim)
+            .filter { it.isNotEmpty() && normalizedModels.contains(it) }
+            .distinct()
+        return config.copy(
+            providerId = config.providerId.trim(),
+            baseUrl = config.baseUrl.trim(),
+            modelId = normalizedModelId,
+            cachedModels = normalizedModels,
+            enabledModelIds = normalizedEnabledModels,
+        )
+    }
+
     private fun createSession(
         id: String,
         messages: List<ChatMessage>,
         title: String? = null,
         hasCustomTitle: Boolean = false,
+        selectedModelKey: String = "",
         selectedSkillIds: List<String> = emptyList(),
         activeSkills: List<ActiveSkillContext> = emptyList(),
         activeMcpServerIds: List<String> = emptyList(),
@@ -2063,6 +2387,7 @@ class AetherViewModel(
             preview = metadata.preview,
             hasCustomTitle = hasCustomTitle,
             messages = messages,
+            selectedModelKey = selectedModelKey,
             selectedSkillIds = selectedSkillIds,
             activeSkills = activeSkills,
             activeMcpServerIds = activeMcpServerIds,
@@ -2231,10 +2556,17 @@ class AetherViewModel(
         if (titleInput.isBlank()) return
 
         viewModelScope.launch {
+            val providerConfigs = _uiState.value.providerConfigs
+            val titleSettings = resolveModelSettings(
+                baseSettings = settings,
+                providerConfigs = providerConfigs,
+                preferredModelKey = resolveDefaultTitleModelKey(settings, providerConfigs),
+                fallbackModelKey = resolveDefaultChatModelKey(settings, providerConfigs),
+            )
             val titleResult = client.createChatCompletion(
-                settings = settings,
+                settings = titleSettings,
                 systemPrompt = SessionTitleSystemPrompt,
-                conversation = listOf(buildProviderUserMessage(settings, titleInput)),
+                conversation = listOf(buildProviderUserMessage(titleSettings, titleInput)),
             )
             val title = titleResult.getOrNull()
                 ?.assistantText
@@ -2278,6 +2610,19 @@ class AetherViewModel(
         settings: AppSettings,
         text: String,
     ): JSONObject = when (settings.provider) {
+        LlmProvider.OpenAiResponses -> JSONObject().apply {
+            put("role", "user")
+            put(
+                "content",
+                JSONArray().put(
+                    JSONObject().apply {
+                        put("type", "input_text")
+                        put("text", text)
+                    }
+                ),
+            )
+        }
+
         LlmProvider.OpenAiCompatible -> JSONObject().apply {
             put("role", "user")
             put("content", text)
@@ -2289,6 +2634,19 @@ class AetherViewModel(
                 "parts",
                 JSONArray().put(
                     JSONObject().apply {
+                        put("text", text)
+                    }
+                ),
+            )
+        }
+
+        LlmProvider.AnthropicMessages -> JSONObject().apply {
+            put("role", "user")
+            put(
+                "content",
+                JSONArray().put(
+                    JSONObject().apply {
+                        put("type", "text")
                         put("text", text)
                     }
                 ),
@@ -2311,7 +2669,6 @@ class AetherViewModel(
             .orEmpty()
             .trimEnd('.', '。', '!', '！', '?', '？')
             .take(36)
-
     private fun pushPendingToolInvocation(
         sessionId: String,
         toolInvocation: ChatToolInvocation,
@@ -2608,6 +2965,67 @@ class AetherViewModel(
         }
     }
 
+    private fun maybeCheckForUpdates(settings: AppSettings) {
+        val now = System.currentTimeMillis()
+        if (now - settings.lastUpdateCheckAtMillis < AppUpdateCheckIntervalMillis) {
+            return
+        }
+        checkForUpdates(manual = false, forceAvailable = false)
+    }
+
+    private fun checkForUpdates(
+        manual: Boolean,
+        forceAvailable: Boolean,
+    ) {
+        if (_uiState.value.appUpdate.isChecking) return
+
+        _uiState.update { current ->
+            current.copy(
+                appUpdate = current.appUpdate.copy(
+                    isChecking = true,
+                    showAvailableDialog = if (manual) false else current.appUpdate.showAvailableDialog,
+                )
+            )
+        }
+        viewModelScope.launch {
+            val checkedAtMillis = System.currentTimeMillis()
+            val result = withContext(Dispatchers.IO) {
+                runCatching { appUpdateManager.fetchLatestRelease() }
+            }
+            settingsRepository.updateLastUpdateCheckAtMillis(checkedAtMillis)
+
+            result
+                .onSuccess { release ->
+                    val hasUpdate = forceAvailable || isVersionNewer(
+                        remoteVersion = release.versionName,
+                        currentVersion = BuildConfig.VERSION_NAME,
+                    )
+                    _uiState.update { current ->
+                        current.copy(
+                            appUpdate = current.appUpdate.copy(
+                                isChecking = false,
+                                availableRelease = if (hasUpdate) release else current.appUpdate.availableRelease,
+                                showAvailableDialog = hasUpdate,
+                            )
+                        )
+                    }
+                    if (!hasUpdate && manual) {
+                        emitTransientMessage("Aether is up to date.")
+                    }
+                }
+                .onFailure { throwable ->
+                    _uiState.update { current ->
+                        current.copy(
+                            appUpdate = current.appUpdate.copy(isChecking = false)
+                        )
+                    }
+                    if (manual) {
+                        emitTransientMessage("Couldn't check for updates: ${throwable.userFacingMessage()}")
+                    }
+                }
+        }
+    }
+
     private fun writeTextToUri(
         uri: Uri,
         text: String,
@@ -2665,8 +3083,13 @@ class AetherViewModel(
         put("agentModeAuthorizationMethod", agentModeAuthorizationMethod.storageValue)
         put("language", language.storageValue)
         put("themeMode", themeMode.storageValue)
+        put("defaultChatModelKey", defaultChatModelKey)
+        put("defaultTitleModelKey", defaultTitleModelKey)
+        put("defaultNamingModelKey", defaultNamingModelKey)
         put("onboardingSeenVersion", onboardingSeenVersion)
         put("onboardingCompletedVersion", onboardingCompletedVersion)
+        put("privacyPolicyAccepted", privacyPolicyAccepted)
+        put("lastUpdateCheckAtMillis", lastUpdateCheckAtMillis)
     }
 
     private fun parseImportedSettings(json: JSONObject?): AppSettings {
@@ -2706,10 +3129,21 @@ class AetherViewModel(
                 defaults.language,
             ),
             themeMode = AppThemeMode.fromStorage(json.optString("themeMode")),
+            defaultChatModelKey = json.optString("defaultChatModelKey", defaults.defaultChatModelKey),
+            defaultTitleModelKey = json.optString("defaultTitleModelKey", defaults.defaultTitleModelKey),
+            defaultNamingModelKey = json.optString("defaultNamingModelKey", defaults.defaultNamingModelKey),
             onboardingSeenVersion = json.optInt("onboardingSeenVersion", defaults.onboardingSeenVersion),
             onboardingCompletedVersion = json.optInt(
                 "onboardingCompletedVersion",
                 defaults.onboardingCompletedVersion,
+            ),
+            privacyPolicyAccepted = json.optBoolean(
+                "privacyPolicyAccepted",
+                defaults.privacyPolicyAccepted,
+            ),
+            lastUpdateCheckAtMillis = json.optLong(
+                "lastUpdateCheckAtMillis",
+                defaults.lastUpdateCheckAtMillis,
             ),
         )
     }

@@ -110,7 +110,10 @@ class AetherAgent(
         val hasMcpCatalog = mcpToolBindings.isNotEmpty() ||
             mcpClientManager.snapshots().any { it.resources.isNotEmpty() || it.prompts.isNotEmpty() }
         val exposeNamespacedMcpTools =
-            settings.provider == LlmProvider.OpenAiCompatible && mcpToolBindings.isNotEmpty()
+            settings.provider in setOf(
+                LlmProvider.OpenAiResponses,
+                LlmProvider.OpenAiCompatible,
+            ) && mcpToolBindings.isNotEmpty()
         var lastAssistantText = ""
         var lastAgentModeScreenshotMessageIndex: Int? = null
         val latestUserText = messages.lastOrNull { it.role == "user" }

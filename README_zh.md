@@ -66,8 +66,8 @@ Aether 的 UI 和交互大量参考了 ChatGPT、Codex CLI/App、Gemini、Poco A
 ## 🛠️ 技术栈
 
 - **Core**: Kotlin / Jetpack Compose / Coroutines
-- **System**: Root / Shizuku API
-- **AI**: OpenAI Compatible API / MCP (Model Context Protocol)
+- **LLM**: OpenAI (Responses) / OpenAI (Chat Completions) / Anthropic Messages / Vertex AI (Express Mode)
+- **Extension**: MCP (stdio, HTTP) / Agent Skills
 - **Tooling**: Termux Integration / WebTools (JSoup, Flexmark)
 - **Data**: DataStore / YAML configuration
 
@@ -81,7 +81,7 @@ Aether 的 UI 和交互大量参考了 ChatGPT、Codex CLI/App、Gemini、Poco A
 - 可选：已安装 [Termux](https://termux.dev/)
 
 ### 安装步骤
-1. 下载最新的 [Release APK](https://github.com/zhousl/Aether/releases)。
+1. 下载最新的 [Release APK](https://github.com/Zhou-Shilin/Aether/releases)。
 2. 根据 Get Started Tour 指引配置。
 
 ---

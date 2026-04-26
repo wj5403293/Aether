@@ -16,8 +16,10 @@ object LlmApiClient {
     suspend fun fetchModels(config: LlmProviderConfig): FetchModelsResult = withContext(Dispatchers.IO) {
         try {
             when (config.providerType) {
+                LlmProvider.OpenAiResponses -> fetchOpenAiModels(config)
                 LlmProvider.OpenAiCompatible -> fetchOpenAiModels(config)
                 LlmProvider.VertexExpress -> fetchVertexModels(config)
+                LlmProvider.AnthropicMessages -> fetchAnthropicModels(config)
             }
         } catch (e: Exception) {
             FetchModelsResult(emptyList(), e.message ?: "Unknown error")
@@ -27,6 +29,7 @@ object LlmApiClient {
     private fun fetchOpenAiModels(config: LlmProviderConfig): FetchModelsResult {
         val baseUrl = config.baseUrl.trimEnd('/')
         val modelsUrl = when {
+            baseUrl.endsWith("/responses") -> baseUrl.replace("/responses", "/models")
             baseUrl.endsWith("/chat/completions") -> baseUrl.replace("/chat/completions", "/models")
             baseUrl.endsWith("/v1") -> "$baseUrl/models"
             else -> "$baseUrl/models"
@@ -81,4 +84,55 @@ object LlmApiClient {
         )
         return FetchModelsResult(defaultModels)
     }
+
+    private fun fetchAnthropicModels(config: LlmProviderConfig): FetchModelsResult {
+        val baseUrl = config.baseUrl.trimEnd('/')
+        val modelsUrl = when {
+            baseUrl.endsWith("/messages") -> baseUrl.replace("/messages", "/models")
+            baseUrl.endsWith("/v1") -> "$baseUrl/models"
+            else -> "$baseUrl/models"
+        }
+
+        val connection = URL(modelsUrl).openConnection() as HttpURLConnection
+        connection.requestMethod = "GET"
+        connection.setRequestProperty("x-api-key", config.apiKey)
+        connection.setRequestProperty("anthropic-version", "2023-06-01")
+        connection.setRequestProperty("Content-Type", "application/json")
+        connection.connectTimeout = 15_000
+        connection.readTimeout = 30_000
+
+        return try {
+            if (connection.responseCode == 200) {
+                val responseText = connection.inputStream.bufferedReader().readText()
+                val json = JSONObject(responseText)
+                val dataArray = json.optJSONArray("data")
+                val models = mutableListOf<String>()
+                if (dataArray != null) {
+                    for (i in 0 until dataArray.length()) {
+                        val modelObj = dataArray.optJSONObject(i)
+                        val modelId = modelObj?.optString("id")
+                        if (!modelId.isNullOrBlank()) {
+                            models.add(modelId)
+                        }
+                    }
+                }
+                if (models.isEmpty()) {
+                    FetchModelsResult(defaultAnthropicModels())
+                } else {
+                    FetchModelsResult(models.sorted())
+                }
+            } else {
+                val errorText = connection.errorStream?.bufferedReader()?.readText() ?: "HTTP ${connection.responseCode}"
+                FetchModelsResult(defaultAnthropicModels(), errorText)
+            }
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun defaultAnthropicModels(): List<String> = listOf(
+        "claude-opus-4-5",
+        "claude-sonnet-4-5",
+        "claude-haiku-4-5",
+    )
 }

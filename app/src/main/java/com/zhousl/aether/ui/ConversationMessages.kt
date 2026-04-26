@@ -796,7 +796,7 @@ fun ConversationAssistantGroupBubble(
         thoughtDurationMillis?.let { duration ->
             Text(
                 text = if (strings.appLanguage == AppLanguage.SimplifiedChinese) {
-                    "鎬濊€冧簡 ${formatThoughtDuration(duration)}"
+                    "思考了 ${formatThoughtDuration(duration)}"
                 } else {
                     "Thought for ${formatThoughtDuration(duration)}"
                 },
@@ -834,18 +834,18 @@ fun ConversationAssistantGroupBubble(
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             AssistantMessageAction(
                 icon = LucideIcons.Copy,
-                contentDescription = if (strings.appLanguage == AppLanguage.SimplifiedChinese) "澶嶅埗鍥炲" else "Copy reply",
+                contentDescription = if (strings.appLanguage == AppLanguage.SimplifiedChinese) "复制回复" else "Copy reply",
                 onClick = onCopy,
             )
             AssistantMessageAction(
                 icon = LucideIcons.RotateCcw,
-                contentDescription = if (strings.appLanguage == AppLanguage.SimplifiedChinese) "閲嶆柊鎵ц鍥炲" else "Redo reply",
+                contentDescription = if (strings.appLanguage == AppLanguage.SimplifiedChinese) "重新执行回复" else "Redo reply",
                 enabled = actionsEnabled,
                 onClick = onRedo,
             )
             AssistantMessageAction(
                 icon = LucideIcons.Trash2,
-                contentDescription = if (strings.appLanguage == AppLanguage.SimplifiedChinese) "鍒犻櫎鍥炲" else "Delete reply",
+                contentDescription = if (strings.appLanguage == AppLanguage.SimplifiedChinese) "删除回复" else "Delete reply",
                 enabled = actionsEnabled,
                 onClick = onDelete,
             )

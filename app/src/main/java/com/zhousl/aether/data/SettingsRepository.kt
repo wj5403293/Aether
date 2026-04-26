@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
@@ -34,8 +35,13 @@ class SettingsRepository(
             ),
             language = AppLanguage.fromStorage(preferences[LANGUAGE]),
             themeMode = AppThemeMode.fromStorage(preferences[THEME_MODE]),
+            defaultChatModelKey = preferences[DEFAULT_CHAT_MODEL_KEY].orEmpty(),
+            defaultTitleModelKey = preferences[DEFAULT_TITLE_MODEL_KEY].orEmpty(),
+            defaultNamingModelKey = preferences[DEFAULT_NAMING_MODEL_KEY].orEmpty(),
             onboardingSeenVersion = preferences[ONBOARDING_SEEN_VERSION] ?: 0,
             onboardingCompletedVersion = preferences[ONBOARDING_COMPLETED_VERSION] ?: 0,
+            privacyPolicyAccepted = preferences[PRIVACY_POLICY_ACCEPTED] ?: false,
+            lastUpdateCheckAtMillis = preferences[LAST_UPDATE_CHECK_AT_MILLIS] ?: 0L,
         )
     }
 
@@ -66,33 +72,23 @@ class SettingsRepository(
         }
     }
 
-    suspend fun setActiveProvider(id: String) {
+    suspend fun setProviderEnabled(
+        id: String,
+        enabled: Boolean,
+    ) {
         context.dataStore.edit { prefs ->
             val current = parseProviderConfigs(prefs[PROVIDER_CONFIGS].orEmpty())
-            val updated = current.map { it.copy(isActive = it.id == id) }
+            val updated = current.map { config ->
+                if (config.id == id) config.copy(isEnabled = enabled) else config
+            }
             prefs[PROVIDER_CONFIGS] = serializeProviderConfigs(updated)
 
-            // Also update legacy single-provider settings for compatibility
-            val activeProvider = updated.firstOrNull { it.isActive }
-            if (activeProvider != null) {
-                prefs[PROVIDER] = activeProvider.providerType.storageValue
-                prefs[API_KEY] = activeProvider.apiKey
-                prefs[BASE_URL] = activeProvider.baseUrl
-                prefs[MODEL_ID] = activeProvider.modelId
-            }
-        }
-    }
-
-    suspend fun updateProviderCachedModels(id: String, models: List<String>) {
-        context.dataStore.edit { prefs ->
-            val current = parseProviderConfigs(prefs[PROVIDER_CONFIGS].orEmpty()).toMutableList()
-            val index = current.indexOfFirst { it.id == id }
-            if (index >= 0) {
-                current[index] = current[index].copy(
-                    cachedModels = models,
-                    updatedAtMillis = System.currentTimeMillis(),
-                )
-                prefs[PROVIDER_CONFIGS] = serializeProviderConfigs(current)
+            val fallbackOption = updated.availableModelOptions().firstOrNull()
+            if (fallbackOption != null) {
+                prefs[PROVIDER] = fallbackOption.providerType.storageValue
+                prefs[API_KEY] = fallbackOption.apiKey
+                prefs[BASE_URL] = fallbackOption.baseUrl
+                prefs[MODEL_ID] = fallbackOption.modelId
             }
         }
     }
@@ -120,8 +116,13 @@ class SettingsRepository(
             it[AGENT_MODE_AUTHORIZATION_METHOD] = settings.agentModeAuthorizationMethod.storageValue
             it[LANGUAGE] = settings.language.storageValue
             it[THEME_MODE] = settings.themeMode.storageValue
+            it[DEFAULT_CHAT_MODEL_KEY] = settings.defaultChatModelKey
+            it[DEFAULT_TITLE_MODEL_KEY] = settings.defaultTitleModelKey
+            it[DEFAULT_NAMING_MODEL_KEY] = settings.defaultNamingModelKey
             it[ONBOARDING_SEEN_VERSION] = settings.onboardingSeenVersion
             it[ONBOARDING_COMPLETED_VERSION] = settings.onboardingCompletedVersion
+            it[PRIVACY_POLICY_ACCEPTED] = settings.privacyPolicyAccepted
+            it[LAST_UPDATE_CHECK_AT_MILLIS] = settings.lastUpdateCheckAtMillis
             it[PROVIDER_CONFIGS] = serializeProviderConfigs(providerConfigs)
         }
     }
@@ -172,6 +173,17 @@ class SettingsRepository(
             it[AGENT_MODE_AUTHORIZATION_METHOD] = settings.agentModeAuthorizationMethod.storageValue
             it[LANGUAGE] = settings.language.storageValue
             it[THEME_MODE] = settings.themeMode.storageValue
+            it[DEFAULT_CHAT_MODEL_KEY] = settings.defaultChatModelKey
+            it[DEFAULT_TITLE_MODEL_KEY] = settings.defaultTitleModelKey
+            it[DEFAULT_NAMING_MODEL_KEY] = settings.defaultNamingModelKey
+            it[PRIVACY_POLICY_ACCEPTED] = settings.privacyPolicyAccepted
+            it[LAST_UPDATE_CHECK_AT_MILLIS] = settings.lastUpdateCheckAtMillis
+        }
+    }
+
+    suspend fun updatePrivacyPolicyAccepted(accepted: Boolean) {
+        context.dataStore.edit { prefs ->
+            prefs[PRIVACY_POLICY_ACCEPTED] = accepted
         }
     }
 
@@ -184,6 +196,12 @@ class SettingsRepository(
     suspend fun updateOnboardingCompletedVersion(version: Int) {
         context.dataStore.edit { prefs ->
             prefs[ONBOARDING_COMPLETED_VERSION] = version
+        }
+    }
+
+    suspend fun updateLastUpdateCheckAtMillis(value: Long) {
+        context.dataStore.edit { prefs ->
+            prefs[LAST_UPDATE_CHECK_AT_MILLIS] = value
         }
     }
 
@@ -206,9 +224,14 @@ class SettingsRepository(
             stringPreferencesKey("agent_mode_authorization_method")
         val LANGUAGE = stringPreferencesKey("language")
         val THEME_MODE = stringPreferencesKey("theme_mode")
+        val DEFAULT_CHAT_MODEL_KEY = stringPreferencesKey("default_chat_model_key")
+        val DEFAULT_TITLE_MODEL_KEY = stringPreferencesKey("default_title_model_key")
+        val DEFAULT_NAMING_MODEL_KEY = stringPreferencesKey("default_naming_model_key")
         val PROVIDER_CONFIGS = stringPreferencesKey("provider_configs")
         val ONBOARDING_SEEN_VERSION = intPreferencesKey("onboarding_seen_version")
         val ONBOARDING_COMPLETED_VERSION = intPreferencesKey("onboarding_completed_version")
+        val PRIVACY_POLICY_ACCEPTED = booleanPreferencesKey("privacy_policy_accepted")
+        val LAST_UPDATE_CHECK_AT_MILLIS = longPreferencesKey("last_update_check_at_millis")
     }
 }
 

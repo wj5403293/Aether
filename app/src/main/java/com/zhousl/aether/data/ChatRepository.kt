@@ -74,6 +74,7 @@ internal fun parseChatSessions(rawValue: String): List<ChatSession> {
                         activeSkills = parseActiveSkillContexts(session.optString("activeSkillsJson")),
                         activeMcpServerIds = parseStringList(session.optJSONArray("activeMcpServerIds")),
                         agentModeEnabled = session.optBoolean("agentModeEnabled", false),
+                        selectedModelKey = session.optString("selectedModelKey"),
                     )
                 )
             }
@@ -94,6 +95,7 @@ internal fun ChatSession.toJson(): JSONObject = JSONObject().apply {
     put("preview", preview)
     put("hasCustomTitle", hasCustomTitle)
     put("agentModeEnabled", agentModeEnabled)
+    put("selectedModelKey", selectedModelKey)
     put("selectedSkillIds", JSONArray().apply { selectedSkillIds.forEach(::put) })
     put("messages", JSONArray().apply { syncActiveBranches(messages).forEach { put(it.toJson()) } })
     put("activeSkillsJson", serializeActiveSkillContexts(activeSkills))

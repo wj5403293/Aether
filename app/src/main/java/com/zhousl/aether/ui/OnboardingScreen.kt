@@ -77,8 +77,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.zhousl.aether.data.AgentModeAuthorizationMethod
 import com.zhousl.aether.data.AppLanguage
+import com.zhousl.aether.data.AutomaticModelPurpose
 import com.zhousl.aether.data.LlmProvider
 import com.zhousl.aether.data.LlmProviderConfig
+import com.zhousl.aether.data.availableModelOptions
+import com.zhousl.aether.data.findModelOption
+import com.zhousl.aether.data.requiresApiKey
+import com.zhousl.aether.data.resolveAutomaticModelKey
 import com.zhousl.aether.termux.TermuxSetupIssue
 import com.zhousl.aether.termux.TermuxSetupState
 import com.zhousl.aether.R
@@ -125,7 +130,7 @@ private val TourDivider: Color
 private val TourSurface: Color
     get() = AetherSurfaceHigh
 private val TourButton: Color
-    get() = AetherPrimary
+    get() = Color.Black
 private val TourBlue: Color
     get() = AetherPrimary
 private val TourGreen: Color
@@ -238,7 +243,7 @@ fun OnboardingScreen(
                 onExit = if (replayMode) onClose else onSkip,
                 onClose = if (replayMode) onClose else onSkip,
                 onReturnToLanding = { currentStep = OnboardingStep.Landing },
-                onComplete = { onCompleteProviderSetup(formState.buildConfig(forceActive = true)) },
+                onComplete = { onCompleteProviderSetup(formState.buildConfig()) },
             )
 
             OnboardingStep.TermuxSetup -> TermuxStep(
@@ -582,7 +587,7 @@ private fun ProviderSetupStep(
     }
     val canContinueFromCredentials = provider != null &&
         formState.baseUrl.trim().isNotBlank() &&
-        (provider != LlmProvider.VertexExpress || formState.apiKey.trim().isNotBlank())
+        (!provider.requiresApiKey || formState.apiKey.trim().isNotBlank())
 
     val message = when (stage) {
         ProviderTourStage.PickProvider -> if (strings.appLanguage == AppLanguage.SimplifiedChinese) "首先，我们来选择你的模型提供方。" else "First, let's choose your model provider."
@@ -636,8 +641,17 @@ private fun ProviderSetupStep(
                         verticalArrangement = Arrangement.spacedBy(14.dp),
                     ) {
                         ProviderStageButton(
-                            label = "OpenAI",
-                            subtitle = if (strings.appLanguage == AppLanguage.SimplifiedChinese) "使用兼容 OpenAI 的 API" else "Use OpenAI-compatible APIs",
+                            label = "OpenAI Responses",
+                            subtitle = if (strings.appLanguage == AppLanguage.SimplifiedChinese) "使用 OpenAI Responses API" else "Use OpenAI Responses API",
+                            provider = LlmProvider.OpenAiResponses,
+                            onClick = {
+                                onSelectProvider(LlmProvider.OpenAiResponses)
+                                stage = ProviderTourStage.Credentials
+                            },
+                        )
+                        ProviderStageButton(
+                            label = "OpenAI Chat Completions",
+                            subtitle = if (strings.appLanguage == AppLanguage.SimplifiedChinese) "使用 OpenAI Chat Completions API" else "Use OpenAI Chat Completions API",
                             provider = LlmProvider.OpenAiCompatible,
                             onClick = {
                                 onSelectProvider(LlmProvider.OpenAiCompatible)
@@ -650,6 +664,15 @@ private fun ProviderSetupStep(
                             provider = LlmProvider.VertexExpress,
                             onClick = {
                                 onSelectProvider(LlmProvider.VertexExpress)
+                                stage = ProviderTourStage.Credentials
+                            },
+                        )
+                        ProviderStageButton(
+                            label = "Anthropic",
+                            subtitle = if (strings.appLanguage == AppLanguage.SimplifiedChinese) "使用 Anthropic Messages API" else "Use Anthropic Messages API",
+                            provider = LlmProvider.AnthropicMessages,
+                            onClick = {
+                                onSelectProvider(LlmProvider.AnthropicMessages)
                                 stage = ProviderTourStage.Credentials
                             },
                         )
@@ -669,19 +692,23 @@ private fun ProviderSetupStep(
                     ) {
                         TinyLabel(
                             text = when (provider) {
+                                LlmProvider.OpenAiResponses -> if (strings.appLanguage == AppLanguage.SimplifiedChinese) "正在使用 OpenAI Responses" else "Using OpenAI Responses"
+                                LlmProvider.OpenAiCompatible -> if (strings.appLanguage == AppLanguage.SimplifiedChinese) "正在使用 OpenAI Chat Completions" else "Using OpenAI Chat Completions"
                                 LlmProvider.VertexExpress -> if (strings.appLanguage == AppLanguage.SimplifiedChinese) "正在使用 Vertex" else "Using Vertex"
-                                else -> if (strings.appLanguage == AppLanguage.SimplifiedChinese) "正在使用 OpenAI" else "Using OpenAI"
+                                LlmProvider.AnthropicMessages -> if (strings.appLanguage == AppLanguage.SimplifiedChinese) "正在使用 Anthropic" else "Using Anthropic"
+                                null -> if (strings.appLanguage == AppLanguage.SimplifiedChinese) "选择请求格式" else "Choose a request format"
                             },
                             color = when (provider) {
                                 LlmProvider.VertexExpress -> TourBlue
+                                LlmProvider.AnthropicMessages -> TourPurple
                                 else -> TourGreen
                             },
                         )
                         MinimalInputField(
                             label = if (strings.appLanguage == AppLanguage.SimplifiedChinese) "API 密钥" else "API key",
                             value = formState.apiKey,
-                            placeholder = if (provider == LlmProvider.VertexExpress) {
-                                if (strings.appLanguage == AppLanguage.SimplifiedChinese) "Vertex 需要" else "Required for Vertex"
+                            placeholder = if (provider?.requiresApiKey == true) {
+                                if (strings.appLanguage == AppLanguage.SimplifiedChinese) "此格式需要" else "Required for this format"
                             } else {
                                 if (strings.appLanguage == AppLanguage.SimplifiedChinese) "可选" else "Optional"
                             },
@@ -706,6 +733,7 @@ private fun ProviderSetupStep(
                                         cachedModels = models,
                                     )
                                     formState.cachedModels = ordered
+                                    formState.enabledModelIds = ordered
                                     if (ordered.isNotEmpty()) {
                                         formState.modelId = ordered.first()
                                     }
@@ -736,7 +764,13 @@ private fun ProviderSetupStep(
                                 ModelOptionButton(
                                     label = model,
                                     selected = formState.modelId.trim().equals(model, ignoreCase = true),
-                                    onClick = { formState.modelId = model },
+                                    onClick = {
+                                        formState.modelId = model
+                                        formState.enabledModelIds = (listOf(model) + formState.enabledModelIds)
+                                            .map(String::trim)
+                                            .filter(String::isNotEmpty)
+                                            .distinct()
+                                    },
                                 )
                             }
                         }
@@ -749,11 +783,20 @@ private fun ProviderSetupStep(
                             },
                             placeholder = if (strings.appLanguage == AppLanguage.SimplifiedChinese) "或者输入你自己的模型" else "Or type your own model",
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-                            onValueChange = { formState.modelId = it },
+                            onValueChange = { value ->
+                                formState.modelId = value
+                                val trimmed = value.trim()
+                                if (trimmed.isNotEmpty()) {
+                                    formState.enabledModelIds = (listOf(trimmed) + formState.enabledModelIds)
+                                        .map(String::trim)
+                                        .filter(String::isNotEmpty)
+                                        .distinct()
+                                }
+                            },
                         )
                         PrimaryActionButton(
                             label = if (strings.appLanguage == AppLanguage.SimplifiedChinese) "开始聊天" else "Start chat",
-                            enabled = provider != null && formState.isValid,
+                            enabled = provider != null && formState.isValid(emptySet()),
                             onClick = { isFinishing = true },
                         )
                     }
@@ -1247,8 +1290,10 @@ private fun ProviderBrandBadge(
 
 @DrawableRes
 private fun providerBrandDrawable(provider: LlmProvider): Int = when (provider) {
+    LlmProvider.OpenAiResponses -> R.drawable.openai_mark
     LlmProvider.OpenAiCompatible -> R.drawable.openai_mark
     LlmProvider.VertexExpress -> R.drawable.googlecloud_mark
+    LlmProvider.AnthropicMessages -> R.drawable.aether_mark
 }
 
 @Composable
@@ -1538,7 +1583,14 @@ private fun prioritizedModelOptions(
     cachedModels: List<String>,
 ): List<String> {
     val fallback = when (provider) {
+        LlmProvider.OpenAiResponses -> listOf(
+            "gpt-5.5",
+            "gpt-5.4",
+            "gpt-5.4-mini",
+        )
+
         LlmProvider.OpenAiCompatible -> listOf(
+            "gpt-5.5",
             "gpt-5.4",
             "claude-4.6-sonnet",
             "gemini-3-flash",
@@ -1551,7 +1603,14 @@ private fun prioritizedModelOptions(
             "gemini-2.0-flash",
         )
 
+        LlmProvider.AnthropicMessages -> listOf(
+            "claude-opus-4-5",
+            "claude-sonnet-4-5",
+            "claude-haiku-4-5",
+        )
+
         null -> listOf(
+            "gpt-5.5",
             "gpt-5.4",
             "gemini-3-flash",
             "gemini-3.1-pro",
@@ -1569,7 +1628,7 @@ private fun prioritizedModelOptions(
     } else {
         emptyList()
     }
-    return (cachedModels + patchedModels + fallback)
+    val orderedModels = (cachedModels + patchedModels + fallback)
         .map(String::trim)
         .filter(String::isNotBlank)
         .distinctBy { it.lowercase() }
@@ -1578,23 +1637,54 @@ private fun prioritizedModelOptions(
                 .thenBy { providerModelRank(provider, it) }
                 .thenBy { it.lowercase() },
         )
+    return orderedModels.withAutomaticChatModelFirst(provider, baseUrl)
 }
 
 private fun preferredModelRank(model: String): Int {
     val normalized = model.lowercase()
     return when {
-        normalized.contains("gpt-5.4") -> 0
-        normalized.contains("gemini-3-flash") || normalized.contains("gemini 3 flash") -> 1
-        normalized.contains("gemini-3.1-pro") || normalized.contains("gemini 3.1 pro") -> 2
-        normalized.contains("claude-4.6-sonnet") || normalized.contains("claude 4.6 sonnet") -> 3
+        normalized.contains("gpt-5.5") -> 0
+        normalized.contains("gpt-5.4") -> 1
+        normalized.contains("gemini-3-flash") || normalized.contains("gemini 3 flash") -> 2
+        normalized.contains("gemini-3.1-pro") || normalized.contains("gemini 3.1 pro") -> 3
+        normalized.contains("claude-4.6-sonnet") || normalized.contains("claude 4.6 sonnet") -> 4
         else -> 10
     }
+}
+
+private fun List<String>.withAutomaticChatModelFirst(
+    provider: LlmProvider?,
+    baseUrl: String,
+): List<String> {
+    if (isEmpty() || provider == null) return this
+    val onboardingConfig = LlmProviderConfig(
+        id = "onboarding",
+        providerId = provider.storageValue,
+        name = provider.displayName,
+        providerType = provider,
+        apiKey = "",
+        baseUrl = baseUrl,
+        modelId = first(),
+        cachedModels = this,
+        enabledModelIds = this,
+    )
+    val options = listOf(onboardingConfig).availableModelOptions()
+    val automaticModel = options.findModelOption(
+        options.resolveAutomaticModelKey(AutomaticModelPurpose.Chat)
+    )?.modelId ?: return this
+    return (listOf(automaticModel) + filterNot { it.equals(automaticModel, ignoreCase = true) })
+        .distinctBy { it.lowercase() }
 }
 
 private fun providerModelRank(
     provider: LlmProvider?,
     model: String,
 ): Int = when (provider) {
+    LlmProvider.OpenAiResponses -> when {
+        model.lowercase().contains("gpt") -> 0
+        else -> 5
+    }
+
     LlmProvider.OpenAiCompatible -> when {
         model.lowercase().contains("gpt") -> 0
         model.lowercase().contains("claude") -> 1
@@ -1604,6 +1694,11 @@ private fun providerModelRank(
 
     LlmProvider.VertexExpress -> when {
         model.lowercase().contains("gemini") -> 0
+        else -> 5
+    }
+
+    LlmProvider.AnthropicMessages -> when {
+        model.lowercase().contains("claude") -> 0
         else -> 5
     }
 
