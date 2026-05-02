@@ -118,6 +118,9 @@ dependencies {
 }
 
 tasks.withType<PostHogCliExecTask>().configureEach {
+    onlyIf {
+        posthogProjectId.isNotBlank() && posthogCliApiKey.isNotBlank()
+    }
     postHogHost.set(posthogCliHost)
     if (posthogProjectId.isNotBlank()) {
         postHogProjectId.set(posthogProjectId)
