@@ -2622,6 +2622,7 @@ class AetherViewModel(
     }
 
     private fun captureTurnCompleted(event: SessionTurnEvent) {
+        val tokenProperties = tokenUsageAnalyticsProperties(event)
         captureAnalyticsEvent(
             event = "conversation turn completed",
             properties = mapOf(
@@ -2631,8 +2632,19 @@ class AetherViewModel(
                 "tool_names" to event.toolNames,
                 "has_tool_calls" to (event.toolCallCount > 0),
                 "duration_millis" to (event.durationMillis ?: 0L),
-            ),
+            ) + tokenProperties,
         )
+        if (event.tokenUsage != null) {
+            captureAnalyticsEvent(
+                event = "tokens used",
+                properties = tokenProperties + mapOf(
+                    "outcome" to event.outcome.name.lowercase(),
+                    "tool_call_count" to event.toolCallCount,
+                    "has_tool_calls" to (event.toolCallCount > 0),
+                    "duration_millis" to (event.durationMillis ?: 0L),
+                ),
+            )
+        }
     }
 
     private fun trackTermuxSetupState(
@@ -2704,6 +2716,39 @@ class AetherViewModel(
         "skill_count" to request.selectedSkillIds.size,
         "mcp_server_count" to request.activeMcpServerIds.size,
     )
+
+    private fun tokenUsageAnalyticsProperties(event: SessionTurnEvent): Map<String, Any> {
+        val usage = event.tokenUsage
+        val totalTokens = usage?.totalTokens ?: 0L
+        val inputTokens = usage?.inputTokens ?: 0L
+        val outputTokens = usage?.outputTokens ?: 0L
+        val inputMessageCount = event.inputMessageCount.coerceAtLeast(0)
+        val userMessageCount = event.userMessageCount.coerceAtLeast(0)
+        return buildMap {
+            put("token_usage_source", event.tokenUsageSource)
+            put("has_token_usage", usage != null)
+            put("input_message_count", inputMessageCount)
+            put("user_message_count", userMessageCount)
+            put("llm_request_count", usage?.requestCount ?: 0)
+            put("input_tokens", inputTokens)
+            put("output_tokens", outputTokens)
+            put("total_tokens", totalTokens)
+            usage?.reasoningTokens?.let { put("reasoning_tokens", it) }
+            usage?.cachedInputTokens?.let { put("cached_input_tokens", it) }
+            put(
+                "average_tokens_per_input_message",
+                if (inputMessageCount > 0) totalTokens.toDouble() / inputMessageCount else 0.0,
+            )
+            put(
+                "average_input_tokens_per_input_message",
+                if (inputMessageCount > 0) inputTokens.toDouble() / inputMessageCount else 0.0,
+            )
+            put(
+                "average_tokens_per_user_message",
+                if (userMessageCount > 0) totalTokens.toDouble() / userMessageCount else 0.0,
+            )
+        }
+    }
 
     private fun captureAnalyticsEvent(
         event: String,

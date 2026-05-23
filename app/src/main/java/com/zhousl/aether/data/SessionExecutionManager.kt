@@ -90,6 +90,10 @@ data class SessionTurnEvent(
     val distinctToolCount: Int = 0,
     val toolNames: List<String> = emptyList(),
     val durationMillis: Long? = null,
+    val tokenUsage: LlmTokenUsage? = null,
+    val tokenUsageSource: String = "unavailable",
+    val inputMessageCount: Int = 0,
+    val userMessageCount: Int = 0,
 )
 
 private enum class ReasoningCompletionTrigger {
@@ -685,15 +689,16 @@ class SessionExecutionManager(
                 trigger = ReasoningCompletionTrigger.TurnFinished,
             )
             val thoughtDurationMillis = (System.currentTimeMillis() - turnStartedAtMillis).coerceAtLeast(0L)
+            val estimatedTokenUsage = estimateRequestTokenUsage(request)
             val completion = result.fold(
-                onSuccess = { reply ->
+                onSuccess = { turnResult ->
                     diagnosticLogger.event(
                         category = "session",
                         event = "turn_model_success",
                         sessionId = handle.sessionId,
                         turnId = turnId,
                         details = mapOf(
-                            "reply_chars" to reply.length,
+                            "reply_chars" to turnResult.assistantText.length,
                             "duration_millis" to thoughtDurationMillis,
                         ),
                     )
@@ -701,10 +706,14 @@ class SessionExecutionManager(
                         sessionId = handle.sessionId,
                         blocks = ensureAssistantResponseFinalText(
                             blocks = currentAssistantResponseBlocks(handle.sessionId),
-                            finalText = reply,
+                            finalText = turnResult.assistantText,
                         ) { handle.nextPendingBlockId("agent-text") },
                         thoughtDurationMillis = thoughtDurationMillis,
                         outcome = SessionTurnOutcome.Success,
+                        tokenUsage = turnResult.tokenUsage ?: estimatedTokenUsage,
+                        tokenUsageSource = if (turnResult.tokenUsage != null) "api" else "estimated",
+                        inputMessageCount = request.requestMessages.size,
+                        userMessageCount = request.requestMessages.count { it.author == MessageAuthor.User },
                     )
                 },
                 onFailure = { throwable ->
@@ -729,6 +738,10 @@ class SessionExecutionManager(
                         ) { handle.nextPendingBlockId("agent-text") },
                         thoughtDurationMillis = thoughtDurationMillis,
                         outcome = SessionTurnOutcome.Failure,
+                        tokenUsage = estimatedTokenUsage,
+                        tokenUsageSource = "estimated",
+                        inputMessageCount = request.requestMessages.size,
+                        userMessageCount = request.requestMessages.count { it.author == MessageAuthor.User },
                     )
                 },
             )
@@ -874,6 +887,10 @@ class SessionExecutionManager(
         blocks: List<AssistantResponseBlock>,
         thoughtDurationMillis: Long?,
         outcome: SessionTurnOutcome,
+        tokenUsage: LlmTokenUsage? = null,
+        tokenUsageSource: String = "unavailable",
+        inputMessageCount: Int = 0,
+        userMessageCount: Int = 0,
     ): CompletionSummary {
         var sessionTitle = resolveSessionTitle(sessionId)
         var replySummary = blocks.lastOrNull()
@@ -912,6 +929,10 @@ class SessionExecutionManager(
             distinctToolCount = toolNames.size,
             toolNames = toolNames,
             durationMillis = thoughtDurationMillis,
+            tokenUsage = tokenUsage,
+            tokenUsageSource = tokenUsageSource,
+            inputMessageCount = inputMessageCount,
+            userMessageCount = userMessageCount,
         )
     }
 
@@ -2259,6 +2280,35 @@ class SessionExecutionManager(
         return count
     }
 
+    private fun estimateRequestTokenUsage(request: SessionTurnRequest): LlmTokenUsage {
+        val inputTokens = estimateChatMessagesTokens(request.requestMessages).toLong()
+        return LlmTokenUsage(
+            inputTokens = inputTokens,
+            totalTokens = inputTokens,
+            requestCount = 1,
+        )
+    }
+
+    private fun estimateChatMessagesTokens(messages: List<ChatMessage>): Int =
+        messages.sumOf { message ->
+            approximateReasoningTokenCount(message.text) +
+                message.attachments.sumOf(::estimateAttachmentTokens)
+        }
+
+    private fun estimateAttachmentTokens(attachment: ChatAttachment): Int =
+        approximateReasoningTokenCount(attachment.name) +
+            when (attachment.kind) {
+                AttachmentKind.Image -> 85
+                AttachmentKind.File -> {
+                    val sizeBytes = attachment.sizeBytes ?: 0L
+                    if (sizeBytes > 0L) {
+                        (sizeBytes / 4L).coerceAtMost(16_000L).toInt()
+                    } else {
+                        0
+                    }
+                }
+            }
+
     private fun takeApproximateReasoningTokens(
         text: String,
         maxTokens: Int,
@@ -2318,6 +2368,10 @@ class SessionExecutionManager(
         val distinctToolCount: Int,
         val toolNames: List<String>,
         val durationMillis: Long?,
+        val tokenUsage: LlmTokenUsage? = null,
+        val tokenUsageSource: String = "unavailable",
+        val inputMessageCount: Int = 0,
+        val userMessageCount: Int = 0,
     ) {
         fun toTurnEvent(sessionId: String): SessionTurnEvent = SessionTurnEvent(
             sessionId = sessionId,
@@ -2326,6 +2380,10 @@ class SessionExecutionManager(
             distinctToolCount = distinctToolCount,
             toolNames = toolNames,
             durationMillis = durationMillis,
+            tokenUsage = tokenUsage,
+            tokenUsageSource = tokenUsageSource,
+            inputMessageCount = inputMessageCount,
+            userMessageCount = userMessageCount,
         )
     }
 

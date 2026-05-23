@@ -25,6 +25,11 @@ private const val SkillMetadataContextBudgetChars = 8_000
 private const val MaxSleepDurationMillis = 10 * 60 * 1000L
 private val DynamicPromptPlaceholderRegex = Regex("""\{\{\s*([A-Za-z0-9_-]+)\s*\}\}""")
 
+data class AetherAgentTurnResult(
+    val assistantText: String,
+    val tokenUsage: LlmTokenUsage? = null,
+)
+
 class AetherAgent(
     private val client: OpenAiCompatibleClient,
     private val bashTool: TermuxBashTool,
@@ -56,7 +61,7 @@ class AetherAgent(
         onStreamingStatus: suspend (StreamingStatus?) -> Unit = {},
         onSkillActivated: suspend (ActiveSkillContext) -> Unit = {},
         pollInjectedUserMessages: suspend () -> List<LlmMessage> = { emptyList() },
-    ): Result<String> {
+    ): Result<AetherAgentTurnResult> {
         diagnosticLogger.event(
             category = "agent",
             event = "turn_start",
@@ -107,6 +112,7 @@ class AetherAgent(
                 LlmProvider.OpenAiCompatible,
             ) && mcpToolBindings.isNotEmpty()
         var lastAssistantText = ""
+        var tokenUsage: LlmTokenUsage? = null
         var lastAgentModeScreenshotMessageIndex: Int? = null
         val latestUserText = messages.lastOrNull { it.role == "user" }
             ?.contentParts
@@ -190,6 +196,9 @@ class AetherAgent(
             }
 
             conversation += response.assistantMessage
+            response.tokenUsage?.let { usage ->
+                tokenUsage = tokenUsage?.plus(usage) ?: usage
+            }
 
             if (response.assistantText.isNotBlank()) {
                 lastAssistantText = response.assistantText
@@ -254,9 +263,12 @@ class AetherAgent(
             round += 1
         }
         Result.success(
-            lastAssistantText.ifBlank {
-                "The model finished without returning any assistant text."
-            }
+            AetherAgentTurnResult(
+                assistantText = lastAssistantText.ifBlank {
+                    "The model finished without returning any assistant text."
+                },
+                tokenUsage = tokenUsage?.withMissingTotalResolved(),
+            )
         ).also {
             diagnosticLogger.event(
                 category = "agent",

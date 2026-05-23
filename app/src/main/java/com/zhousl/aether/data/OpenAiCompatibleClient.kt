@@ -130,7 +130,7 @@ class OpenAiCompatibleClient(
                     "request_url" to responsePayload.requestUrl,
                     "assistant_text_chars" to result.assistantText.length,
                     "tool_call_count" to result.toolCalls.size,
-                ),
+                ) + result.tokenUsage.diagnosticDetails(),
             )
             Result.success(result)
         } catch (cancellationException: CancellationException) {
@@ -226,7 +226,7 @@ class OpenAiCompatibleClient(
                     "streaming" to true,
                     "assistant_text_chars" to result.assistantText.length,
                     "tool_call_count" to result.toolCalls.size,
-                ),
+                ) + result.tokenUsage.diagnosticDetails(),
             )
             Result.success(result)
         } catch (cancellationException: CancellationException) {
@@ -513,12 +513,16 @@ class OpenAiCompatibleClient(
             assistantMessage = JSONObject(message.toString()),
             reasoningText = extractOpenAiReasoningText(message),
             reasoningSummaryText = extractReasoningDetailsSummary(message.optJSONArray("reasoning_details")),
+            tokenUsage = parseOpenAiUsage(json),
         )
     }
 
     private fun parseOpenAiResponses(json: JSONObject): ChatCompletionResult {
         val output = json.optJSONArray("output") ?: JSONArray()
-        return buildOpenAiResponsesResult(output)
+        return buildOpenAiResponsesResult(
+            output = output,
+            tokenUsage = parseOpenAiUsage(json),
+        )
     }
 
     private fun parseAnthropicMessage(json: JSONObject): ChatCompletionResult {
@@ -554,6 +558,7 @@ class OpenAiCompatibleClient(
                 put("role", "assistant")
                 put("content", JSONArray(content.toString()))
             },
+            tokenUsage = parseAnthropicUsage(json),
         )
     }
 
@@ -598,6 +603,7 @@ class OpenAiCompatibleClient(
             assistantText = assistantText,
             toolCalls = toolCalls,
             assistantMessage = assistantMessage,
+            tokenUsage = parseVertexUsage(json),
         )
     }
 
@@ -1010,6 +1016,12 @@ class OpenAiCompatibleClient(
             }
             if (stream) {
                 put("stream", true)
+                put(
+                    "stream_options",
+                    JSONObject().apply {
+                        put("include_usage", true)
+                    },
+                )
             }
             putReasoningDisabledIfNeeded(settings, disableReasoning)
         }
@@ -1779,8 +1791,12 @@ private class OpenAiStreamAccumulator(
     private val reasoningSummary = StringBuilder()
     private val reasoningDetails = mutableListOf<JSONObject>()
     private val toolCalls = linkedMapOf<Int, MutableToolCallAccumulator>()
+    private var tokenUsage: LlmTokenUsage? = null
 
     suspend fun consume(chunk: JSONObject) {
+        parseOpenAiUsage(chunk)?.let { usage ->
+            tokenUsage = usage
+        }
         val choices = chunk.optJSONArray("choices") ?: return
         for (choiceIndex in 0 until choices.length()) {
             val choice = choices.optJSONObject(choiceIndex) ?: continue
@@ -1884,6 +1900,7 @@ private class OpenAiStreamAccumulator(
                 .ifBlank { reasoningDetailsText.toString() }
                 .ifBlank { reasoningSummary.toString() },
             reasoningSummaryText = reasoningSummary.toString(),
+            tokenUsage = tokenUsage,
         )
     }
 }
@@ -1895,8 +1912,12 @@ private class OpenAiResponsesStreamAccumulator(
     private val messageContent = mutableListOf<JSONObject>()
     private val toolCalls = linkedMapOf<Int, MutableToolCallAccumulator>()
     private val completedFunctionCalls = linkedMapOf<Int, JSONObject>()
+    private var tokenUsage: LlmTokenUsage? = null
 
     suspend fun consume(chunk: JSONObject) {
+        parseOpenAiUsage(chunk)?.let { usage ->
+            tokenUsage = usage
+        }
         when (chunk.optString("type")) {
             "response.output_text.delta" -> {
                 val delta = chunk.optString("delta")
@@ -1963,7 +1984,10 @@ private class OpenAiResponsesStreamAccumulator(
             }
             completedFunctionCalls.toSortedMap().values.forEach(::put)
         }
-        return buildOpenAiResponsesResult(responseItems)
+        return buildOpenAiResponsesResult(
+            output = responseItems,
+            tokenUsage = tokenUsage,
+        )
     }
 
     private fun consumeOutputItem(
@@ -2018,8 +2042,12 @@ private class AnthropicStreamAccumulator(
     private val assistantText = StringBuilder()
     private val contentBlocks = mutableListOf<JSONObject>()
     private val toolUseBlocks = linkedMapOf<Int, MutableAnthropicToolUseAccumulator>()
+    private var tokenUsage: LlmTokenUsage? = null
 
     suspend fun consume(chunk: JSONObject) {
+        parseAnthropicUsage(chunk)?.let { usage ->
+            tokenUsage = mergePartialTokenUsage(tokenUsage, usage)
+        }
         when (chunk.optString("type")) {
             "content_block_start" -> {
                 val index = chunk.optInt("index", contentBlocks.size)
@@ -2084,6 +2112,7 @@ private class AnthropicStreamAccumulator(
         return buildAnthropicResultFromContent(
             assistantText = assistantText.toString(),
             content = normalizedBlocks,
+            tokenUsage = tokenUsage,
         )
     }
 
@@ -2114,8 +2143,12 @@ private class VertexStreamAccumulator(
 ) {
     private val assistantText = StringBuilder()
     private val parts = mutableListOf<MutableVertexPartAccumulator>()
+    private var tokenUsage: LlmTokenUsage? = null
 
     suspend fun consume(chunk: JSONObject) {
+        parseVertexUsage(chunk)?.let { usage ->
+            tokenUsage = usage
+        }
         val candidates = chunk.optJSONArray("candidates") ?: return
         for (candidateIndex in 0 until candidates.length()) {
             val candidate = candidates.optJSONObject(candidateIndex) ?: continue
@@ -2157,6 +2190,7 @@ private class VertexStreamAccumulator(
             assistantText = resolvedText,
             toolCalls = resolvedToolCalls,
             assistantMessage = buildVertexAssistantMessage(resolvedParts),
+            tokenUsage = tokenUsage,
         )
     }
 }
@@ -2276,7 +2310,10 @@ private fun JSONObject.optNullableString(key: String): String? {
     }
 }
 
-private fun buildOpenAiResponsesResult(output: JSONArray): ChatCompletionResult {
+private fun buildOpenAiResponsesResult(
+    output: JSONArray,
+    tokenUsage: LlmTokenUsage? = null,
+): ChatCompletionResult {
     val assistantText = StringBuilder()
     val toolCalls = mutableListOf<ChatCompletionToolCall>()
     val assistantItems = JSONArray()
@@ -2318,6 +2355,7 @@ private fun buildOpenAiResponsesResult(output: JSONArray): ChatCompletionResult 
         assistantMessage = JSONObject().apply {
             put(OpenAiResponsesItemsKey, assistantItems)
         },
+        tokenUsage = tokenUsage,
     )
 }
 
@@ -2355,6 +2393,7 @@ private fun extractOpenAiResponsesOutputText(output: JSONArray): String = buildS
 private fun buildAnthropicResultFromContent(
     assistantText: String,
     content: JSONArray,
+    tokenUsage: LlmTokenUsage? = null,
 ): ChatCompletionResult {
     val toolCalls = buildList {
         for (index in 0 until content.length()) {
@@ -2376,6 +2415,7 @@ private fun buildAnthropicResultFromContent(
             put("role", "assistant")
             put("content", JSONArray(content.toString()))
         },
+        tokenUsage = tokenUsage,
     )
 }
 
@@ -2442,6 +2482,111 @@ private fun buildVertexAssistantMessage(
             }
         }
     )
+}
+
+private fun parseOpenAiUsage(json: JSONObject): LlmTokenUsage? {
+    val usage = json.optJSONObject("usage") ?: return null
+    val inputTokens = usage.optPositiveLong(
+        "input_tokens",
+        "prompt_tokens",
+    )
+    val outputTokens = usage.optPositiveLong(
+        "output_tokens",
+        "completion_tokens",
+    )
+    val completionDetails = usage.optJSONObject("completion_tokens_details")
+    val promptDetails = usage.optJSONObject("prompt_tokens_details")
+    return LlmTokenUsage(
+        inputTokens = inputTokens,
+        outputTokens = outputTokens,
+        totalTokens = usage.optPositiveLong("total_tokens")
+            ?: LlmTokenUsage.sumNullable(inputTokens, outputTokens),
+        reasoningTokens = completionDetails?.optPositiveLong("reasoning_tokens")
+            ?: usage.optPositiveLong("reasoning_tokens"),
+        cachedInputTokens = promptDetails?.optPositiveLong("cached_tokens")
+            ?: usage.optPositiveLong("cached_input_tokens"),
+    ).takeIfMeaningful()
+}
+
+private fun parseAnthropicUsage(json: JSONObject): LlmTokenUsage? {
+    val usage = when (json.optString("type")) {
+        "message_delta" -> json.optJSONObject("usage")
+        "message_start" -> json.optJSONObject("message")?.optJSONObject("usage")
+        else -> json.optJSONObject("usage")
+    } ?: return null
+    val inputTokens = usage.optPositiveLong("input_tokens")
+    val outputTokens = usage.optPositiveLong("output_tokens")
+    return LlmTokenUsage(
+        inputTokens = inputTokens,
+        outputTokens = outputTokens,
+        totalTokens = LlmTokenUsage.sumNullable(inputTokens, outputTokens),
+        cachedInputTokens = usage.optPositiveLong(
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+        ),
+    ).takeIfMeaningful()
+}
+
+private fun parseVertexUsage(json: JSONObject): LlmTokenUsage? {
+    val usage = json.optJSONObject("usageMetadata") ?: return null
+    val inputTokens = usage.optPositiveLong("promptTokenCount")
+    val outputTokens = usage.optPositiveLong("candidatesTokenCount")
+    return LlmTokenUsage(
+        inputTokens = inputTokens,
+        outputTokens = outputTokens,
+        totalTokens = usage.optPositiveLong("totalTokenCount")
+            ?: LlmTokenUsage.sumNullable(inputTokens, outputTokens),
+        cachedInputTokens = usage.optPositiveLong("cachedContentTokenCount"),
+    ).takeIfMeaningful()
+}
+
+private fun JSONObject.optPositiveLong(vararg keys: String): Long? {
+    keys.forEach { key ->
+        if (!has(key) || isNull(key)) return@forEach
+        val value = when (val raw = opt(key)) {
+            is Number -> raw.toLong()
+            is String -> raw.toLongOrNull()
+            else -> null
+        }
+        if (value != null && value >= 0L) return value
+    }
+    return null
+}
+
+private fun LlmTokenUsage.takeIfMeaningful(): LlmTokenUsage? =
+    if (
+        inputTokens != null ||
+        outputTokens != null ||
+        totalTokens != null ||
+        reasoningTokens != null ||
+        cachedInputTokens != null
+    ) {
+        withMissingTotalResolved()
+    } else {
+        null
+    }
+
+private fun mergePartialTokenUsage(
+    existing: LlmTokenUsage?,
+    incoming: LlmTokenUsage,
+): LlmTokenUsage = LlmTokenUsage(
+    inputTokens = incoming.inputTokens ?: existing?.inputTokens,
+    outputTokens = incoming.outputTokens ?: existing?.outputTokens,
+    totalTokens = null,
+    reasoningTokens = incoming.reasoningTokens ?: existing?.reasoningTokens,
+    cachedInputTokens = incoming.cachedInputTokens ?: existing?.cachedInputTokens,
+    requestCount = existing?.requestCount ?: incoming.requestCount,
+).withMissingTotalResolved()
+
+private fun LlmTokenUsage?.diagnosticDetails(): Map<String, Any> {
+    val usage = this ?: return emptyMap()
+    return buildMap {
+        usage.inputTokens?.let { put("input_tokens", it) }
+        usage.outputTokens?.let { put("output_tokens", it) }
+        usage.totalTokens?.let { put("total_tokens", it) }
+        usage.reasoningTokens?.let { put("reasoning_tokens", it) }
+        usage.cachedInputTokens?.let { put("cached_input_tokens", it) }
+    }
 }
 
 private fun sanitizeVertexConversationMessage(message: JSONObject): JSONObject =
