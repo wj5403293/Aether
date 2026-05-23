@@ -89,12 +89,13 @@ enum class AppLanguage(
 enum class AppThemeMode(
     val storageValue: String,
 ) {
+    System("system"),
     Light("light"),
     Dark("dark");
 
     companion object {
         fun fromStorage(value: String?): AppThemeMode =
-            entries.firstOrNull { it.storageValue == value } ?: Light
+            entries.firstOrNull { it.storageValue == value } ?: System
     }
 }
 
@@ -150,6 +151,11 @@ data class AppSettings(
 )
 
 data class LlmCustomHeader(
+    val name: String,
+    val value: String,
+)
+
+data class TermuxEnvironmentVariable(
     val name: String,
     val value: String,
 )

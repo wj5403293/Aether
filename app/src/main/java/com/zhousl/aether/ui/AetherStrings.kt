@@ -379,8 +379,15 @@ fun AetherStrings.languageDisplayName(language: AppLanguage): String = when (lan
 }
 
 fun AetherStrings.themeDisplayName(themeMode: AppThemeMode): String = when (themeMode) {
+    AppThemeMode.System -> if (isChinese) "跟随系统" else "System"
     AppThemeMode.Light -> if (isChinese) "浅色" else "Light"
     AppThemeMode.Dark -> if (isChinese) "深色" else "Dark"
+}
+
+fun AetherStrings.themeSubtitle(themeMode: AppThemeMode): String = when (themeMode) {
+    AppThemeMode.System -> if (isChinese) "跟随系统浅色或深色外观。" else "Follow the system light or dark appearance."
+    AppThemeMode.Light -> lightThemeSubtitle
+    AppThemeMode.Dark -> darkThemeSubtitle
 }
 
 fun AetherStrings.generalSettingsSummary(

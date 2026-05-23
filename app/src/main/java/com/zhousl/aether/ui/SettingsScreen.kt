@@ -1301,31 +1301,105 @@ private fun GeneralSettingsPageV2(
         Spacer(Modifier.height(16.dp))
 
         SettingsCardGroup {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 14.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text = strings.theme,
-                    style = MaterialTheme.typography.titleMedium,
-                    color = AetherOnSurface,
-                )
-                ThemeModeToggle(
-                    isDark = selectedThemeMode == AppThemeMode.Dark,
-                    onToggle = {
-                        onThemeModeSelected(
-                            if (selectedThemeMode == AppThemeMode.Dark) {
-                                AppThemeMode.Light
-                            } else {
-                                AppThemeMode.Dark
-                            }
-                        )
-                    },
+            SelectionDropdownField(
+                label = strings.theme,
+                supportingText = strings.themeDescription,
+                selectedLabel = strings.themeDisplayName(selectedThemeMode),
+                options = AppThemeMode.entries.map { option ->
+                    SelectionOption(
+                        key = option.storageValue,
+                        title = strings.themeDisplayName(option),
+                        subtitle = strings.themeSubtitle(option),
+                        selected = option == selectedThemeMode,
+                        onClick = { onThemeModeSelected(option) },
+                    )
+                },
+            )
+        }
+    }
+}
+
+@Composable
+private fun TermuxEnvironmentVariablesSection(
+    variables: List<TermuxEnvironmentVariable>,
+    onVariablesChanged: (List<TermuxEnvironmentVariable>) -> Unit,
+) {
+    val strings = rememberAetherStrings()
+    SettingsCardGroup {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                text = tr(strings, "Environment variables", "环境变量"),
+                style = MaterialTheme.typography.titleMedium,
+                color = AetherOnSurface,
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = tr(
+                    strings,
+                    "Injected into every Termux bash command, for example HTTP_PROXY or HTTPS_PROXY.",
+                    "每次运行 Termux bash 命令时都会注入，例如 HTTP_PROXY 或 HTTPS_PROXY。",
+                ),
+                style = MaterialTheme.typography.bodySmall,
+                color = AetherOnSurfaceVariant,
+            )
+            Spacer(Modifier.height(14.dp))
+
+            val rows = if (variables.isEmpty()) {
+                listOf(TermuxEnvironmentVariable("", ""))
+            } else {
+                variables
+            }
+            fun commitRows(updatedRows: List<TermuxEnvironmentVariable>) {
+                onVariablesChanged(
+                    updatedRows.filter { it.name.isNotBlank() || it.value.isNotBlank() }
                 )
             }
+            rows.forEachIndexed { index, variable ->
+                var nameValue by rememberSaveable(index, variable.name, stateSaver = TextFieldValue.Saver) {
+                    mutableStateOf(TextFieldValue(variable.name))
+                }
+                var valueValue by rememberSaveable(index, variable.value, stateSaver = TextFieldValue.Saver) {
+                    mutableStateOf(TextFieldValue(variable.value))
+                }
+                fun commitRow(name: String = nameValue.text, value: String = valueValue.text) {
+                    val updated = rows.toMutableList()
+                    updated[index] = TermuxEnvironmentVariable(name, value)
+                    commitRows(updated)
+                }
+
+                ChatGptTextField(
+                    label = tr(strings, "Name", "名称"),
+                    value = nameValue,
+                    onValueChange = {
+                        nameValue = it
+                        commitRow(name = it.text)
+                    },
+                )
+                ChatGptTextField(
+                    label = tr(strings, "Value", "值"),
+                    value = valueValue,
+                    onValueChange = {
+                        valueValue = it
+                        commitRow(value = it.text)
+                    },
+                )
+                if (variable.name.isNotBlank() || variable.value.isNotBlank()) {
+                    Spacer(Modifier.height(8.dp))
+                    SettingsSubtleActionButton(
+                        label = tr(strings, "Remove variable", "删除变量"),
+                        onClick = {
+                            commitRows(rows.filterIndexed { rowIndex, _ -> rowIndex != index })
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                Spacer(Modifier.height(12.dp))
+            }
+            SettingsSubtleActionButton(
+                label = tr(strings, "Add variable", "添加变量"),
+                onClick = { onVariablesChanged(variables + TermuxEnvironmentVariable("", "")) },
+                modifier = Modifier.fillMaxWidth(),
+            )
         }
     }
 }
