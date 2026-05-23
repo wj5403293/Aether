@@ -23,6 +23,11 @@ import org.json.JSONObject
 
 private const val DraftSessionId = "draft"
 private const val PersistedReasoningRawTextMaxChars = 12_000
+private const val PersistedProviderPayloadJsonMaxChars = 120_000
+private const val PersistedToolArgumentsJsonMaxChars = 24_000
+private const val PersistedToolOutputJsonMaxChars = 72_000
+private const val PersistedReasoningSummaryRawTextMaxChars = 4_000
+private const val PersistedJsonStringValueMaxChars = 16_000
 
 private val Context.chatDataStore by preferencesDataStore(name = "aether_chats")
 
@@ -184,9 +189,9 @@ private fun ChatMessage.toJson(): JSONObject = JSONObject().apply {
     if (assistantActionsHidden) {
         put("assistantActionsHidden", true)
     }
-    if (providerPayloadJson.isNotBlank()) {
-        put("providerPayloadJson", providerPayloadJson)
-    }
+    truncatePersistedText(providerPayloadJson, PersistedProviderPayloadJsonMaxChars)
+        .takeIf { it.isNotBlank() }
+        ?.let { put("providerPayloadJson", it) }
     if (displayKind != MessageDisplayKind.Standard) {
         put("displayKind", displayKind.name)
     }
@@ -288,7 +293,7 @@ private fun parseReasoningTrace(json: JSONObject?): ReasoningTrace? {
 
 private fun ReasoningTrace.toJson(): JSONObject = JSONObject().apply {
     put("id", id)
-    put("rawText", if (hasSummary) "" else rawText.take(PersistedReasoningRawTextMaxChars))
+    put("rawText", if (hasSummary) "" else truncatePersistedText(rawText, PersistedReasoningRawTextMaxChars))
     put("latestStatusText", latestStatusText)
     put("startedAtMillis", startedAtMillis)
     completedAtMillis?.let { put("completedAtMillis", it) }
@@ -320,7 +325,14 @@ private fun ReasoningSummaryChunk.toJson(): JSONObject = JSONObject().apply {
     put("id", id)
     put("title", title)
     put("detail", detail)
-    put("rawText", if (title.isNotBlank() || detail.isNotBlank()) "" else rawText.take(PersistedReasoningRawTextMaxChars))
+    put(
+        "rawText",
+        if (title.isNotBlank() || detail.isNotBlank()) {
+            ""
+        } else {
+            truncatePersistedText(rawText, PersistedReasoningSummaryRawTextMaxChars)
+        },
+    )
     put("isPending", isPending)
     put("createdAtMillis", createdAtMillis)
     put("timelineOrder", timelineOrder)
@@ -361,8 +373,8 @@ private fun parseToolInvocations(toolInvocations: JSONArray?): List<ChatToolInvo
 private fun ChatToolInvocation.toJson(): JSONObject = JSONObject().apply {
     put("id", id)
     put("toolName", toolName)
-    put("argumentsJson", argumentsJson)
-    put("outputJson", outputJson)
+    put("argumentsJson", truncatePersistedJson(argumentsJson, PersistedToolArgumentsJsonMaxChars))
+    put("outputJson", truncatePersistedJson(outputJson, PersistedToolOutputJsonMaxChars))
     put("isRunning", isRunning)
     put("startedAtUptimeMillis", startedAtUptimeMillis)
     completedAtUptimeMillis?.let { put("completedAtUptimeMillis", it) }
@@ -386,4 +398,47 @@ private fun parseStringList(array: JSONArray?): List<String> {
 private fun timestampFromMessageId(messageId: String): Long {
     val timestamp = messageId.substringAfterLast('-', missingDelimiterValue = "")
     return timestamp.toLongOrNull()?.takeIf { it > 0L } ?: 0L
+}
+
+private fun truncatePersistedText(
+    value: String,
+    maxChars: Int,
+): String {
+    if (value.length <= maxChars) return value
+    val omittedChars = value.length - maxChars
+    return value.take(maxChars) + "\n\n[... $omittedChars characters omitted from persisted chat storage]"
+}
+
+private fun truncatePersistedJson(
+    value: String,
+    maxChars: Int,
+): String {
+    if (value.length <= maxChars) return value
+    val parsed = runCatching { JSONObject(value) }.getOrNull()
+    if (parsed != null) {
+        val compactedText = compactPersistedJsonObject(parsed).toString()
+        if (compactedText.length <= maxChars) return compactedText
+    }
+    return JSONObject().apply {
+        put("ok", false)
+        put("truncated", true)
+        put("text", truncatePersistedText(value, maxChars))
+    }.toString()
+}
+
+private fun compactPersistedJsonObject(json: JSONObject): JSONObject {
+    val compacted = JSONObject()
+    json.keys().forEach { key ->
+        val value = json.opt(key)
+        compacted.put(
+            key,
+            if (value is String) {
+                truncatePersistedText(value, PersistedJsonStringValueMaxChars)
+            } else {
+                value
+            },
+        )
+    }
+    compacted.put("aetherPersistedOutputTruncated", true)
+    return compacted
 }
