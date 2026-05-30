@@ -1079,6 +1079,9 @@ private fun buildConversationModelOptions(
     if (configuredOptions.isNotEmpty()) {
         return configuredOptions
     }
+    if (providerConfigs.isNotEmpty()) {
+        return emptyList()
+    }
     return listOf(
         ProviderModelOption(
             key = buildModelOptionKey("legacy", settings.modelId),

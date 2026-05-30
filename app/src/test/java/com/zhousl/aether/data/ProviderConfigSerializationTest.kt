@@ -46,6 +46,76 @@ class ProviderConfigSerializationTest {
     }
 
     @Test
+    fun availableModelOptionsSkipsDisabledProvidersAndModels() {
+        val options = listOf(
+            LlmProviderConfig(
+                id = "enabled-provider",
+                providerId = "enabled",
+                name = "Enabled",
+                providerType = LlmProvider.OpenAiCompatible,
+                apiKey = "",
+                baseUrl = "https://enabled.example/v1",
+                modelId = "enabled-model",
+                cachedModels = listOf("enabled-model", "disabled-model"),
+                enabledModelIds = listOf("enabled-model"),
+                isEnabled = true,
+            ),
+            LlmProviderConfig(
+                id = "disabled-provider",
+                providerId = "disabled",
+                name = "Disabled",
+                providerType = LlmProvider.OpenAiCompatible,
+                apiKey = "",
+                baseUrl = "https://disabled.example/v1",
+                modelId = "disabled-provider-model",
+                cachedModels = listOf("disabled-provider-model"),
+                enabledModelIds = listOf("disabled-provider-model"),
+                isEnabled = false,
+            ),
+        ).availableModelOptions()
+
+        assertEquals(listOf("enabled/enabled-model"), options.map { it.fullLabel })
+    }
+
+    @Test
+    fun availableModelOptionsGroupsMatchingModelProviderPrefixes() {
+        val options = listOf(
+            LlmProviderConfig(
+                id = "first-site",
+                providerId = "site_a",
+                name = "Site A",
+                providerType = LlmProvider.OpenAiCompatible,
+                apiKey = "",
+                baseUrl = "https://site-a.example/v1",
+                modelId = "google/gemini-pro",
+                cachedModels = listOf("google/gemini-pro", "openai/gpt-5"),
+                enabledModelIds = listOf("google/gemini-pro", "openai/gpt-5"),
+            ),
+            LlmProviderConfig(
+                id = "second-site",
+                providerId = "site_b",
+                name = "Site B",
+                providerType = LlmProvider.OpenAiCompatible,
+                apiKey = "",
+                baseUrl = "https://site-b.example/v1",
+                modelId = "openai/gpt-4o",
+                cachedModels = listOf("anthropic/claude-sonnet", "openai/gpt-4o"),
+                enabledModelIds = listOf("anthropic/claude-sonnet", "openai/gpt-4o"),
+            ),
+        ).availableModelOptions()
+
+        assertEquals(
+            listOf(
+                "site_b/anthropic/claude-sonnet",
+                "site_a/google/gemini-pro",
+                "site_a/openai/gpt-5",
+                "site_b/openai/gpt-4o",
+            ),
+            options.map { it.fullLabel },
+        )
+    }
+
+    @Test
     fun providerConfigRoundTripsCustomHeaders() {
         val serialized = serializeProviderConfigs(
             listOf(

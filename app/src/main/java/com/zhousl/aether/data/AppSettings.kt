@@ -509,8 +509,15 @@ fun List<LlmProviderConfig>.availableModelOptions(
                 chatLabel = if ((modelCounts[normalizedModelId] ?: 0) > 1) fullLabel else normalizedModelId,
             )
         }
-    }.sortedWith(compareBy(ProviderModelOption::providerId, ProviderModelOption::modelId))
+    }.sortedWith(
+        compareBy<ProviderModelOption> { it.modelProviderPrefixSortKey() }
+            .thenBy { it.providerId }
+            .thenBy { it.modelId }
+    )
 }
+
+private fun ProviderModelOption.modelProviderPrefixSortKey(): String =
+    modelId.substringBefore('/').trim().ifBlank { modelId }
 
 fun AppSettings.withModelOption(option: ProviderModelOption): AppSettings = copy(
     provider = option.providerType,
