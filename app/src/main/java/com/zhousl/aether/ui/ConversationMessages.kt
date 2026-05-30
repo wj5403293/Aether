@@ -151,6 +151,7 @@ import java.net.URL
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.util.Base64
 import java.util.Locale
 import kotlin.math.roundToInt
 
@@ -2959,7 +2960,7 @@ fun AttachmentPreviewDialog(
 private fun AttachmentImagePreview(
     attachment: ChatAttachment,
 ) {
-    val bitmap = rememberAttachmentBitmap(attachment.uri, maxSize = 2200)
+    val bitmap = rememberAttachmentBitmap(attachment, maxSize = 2200)
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -3038,7 +3039,7 @@ private fun UserImageAttachmentCard(
     attachment: ChatAttachment,
     onClick: () -> Unit,
 ) {
-    val bitmap = rememberAttachmentBitmap(attachment.uri, maxSize = 1400)
+    val bitmap = rememberAttachmentBitmap(attachment, maxSize = 1400)
     Box(
         modifier = Modifier
             .widthIn(max = 300.dp)
@@ -3131,7 +3132,7 @@ private fun ComposerImageAttachmentCard(
     onRemove: () -> Unit,
 ) {
     val strings = rememberAetherStrings()
-    val bitmap = rememberAttachmentBitmap(attachment.uri, maxSize = 600)
+    val bitmap = rememberAttachmentBitmap(attachment, maxSize = 600)
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -3307,29 +3308,66 @@ private fun formatMessageTimestamp(createdAtMillis: Long): String {
 
 @Composable
 private fun rememberAttachmentBitmap(
-    uriString: String,
+    attachment: ChatAttachment,
     maxSize: Int,
 ): ImageBitmap? {
     val context = LocalContext.current
-    val bitmap by produceState<ImageBitmap?>(initialValue = null, uriString, maxSize) {
+    val bitmap by produceState<ImageBitmap?>(initialValue = null, attachment, maxSize) {
         value = withContext(Dispatchers.IO) {
-            val resolver = context.contentResolver
-            val uri = Uri.parse(uriString)
-            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
-            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
-                return@withContext null
-            }
-
-            val sampleSize = calculateSampleSize(bounds.outWidth, bounds.outHeight, maxSize)
-            val options = BitmapFactory.Options().apply { inSampleSize = sampleSize }
-            resolver.openInputStream(uri)?.use { stream ->
-                BitmapFactory.decodeStream(stream, null, options)?.asImageBitmap()
-            }
+            decodeInlineAttachmentBitmap(attachment, maxSize)
+                ?: decodeUriAttachmentBitmap(
+                    resolver = context.contentResolver,
+                    uriString = attachment.uri,
+                    maxSize = maxSize,
+                )
         }
     }
     return bitmap
 }
+
+private fun decodeInlineAttachmentBitmap(
+    attachment: ChatAttachment,
+    maxSize: Int,
+): ImageBitmap? = runCatching {
+    if (attachment.inlineBase64.isBlank()) return@runCatching null
+    val bytes = Base64.getDecoder().decode(attachment.inlineBase64)
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@runCatching null
+
+    val sampleSize = calculateSampleSize(bounds.outWidth, bounds.outHeight, maxSize)
+    val options = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)?.asImageBitmap()
+}.getOrNull()
+
+private fun decodeUriAttachmentBitmap(
+    resolver: android.content.ContentResolver,
+    uriString: String,
+    maxSize: Int,
+): ImageBitmap? = decodeUriAttachmentBitmap(
+    uriString = uriString,
+    maxSize = maxSize,
+    openInputStream = { uri -> resolver.openInputStream(uri) },
+)
+
+internal fun decodeUriAttachmentBitmap(
+    uriString: String,
+    maxSize: Int,
+    openInputStream: (Uri) -> java.io.InputStream?,
+): ImageBitmap? = runCatching {
+    val uri = Uri.parse(uriString)
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+        return@runCatching null
+    }
+
+    val sampleSize = calculateSampleSize(bounds.outWidth, bounds.outHeight, maxSize)
+    val options = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+    openInputStream(uri)?.use { stream ->
+        BitmapFactory.decodeStream(stream, null, options)?.asImageBitmap()
+    }
+}.getOrNull()
 
 @Composable
 private fun rememberAttachmentTextPreview(
@@ -3779,7 +3817,7 @@ private fun formatToolInvocationDetail(strings: AetherStrings, toolInvocation: C
         .ifBlank { strings.toolInvocationCommandLabel(toolInvocation.toolName, arguments) }
         .ifBlank { toolInvocation.toolName }
 
-    if (toolInvocation.isRunning) {
+    if (toolInvocation.isRunning && output == null) {
         return ToolInvocationDetail(
             command = command,
             result = null,

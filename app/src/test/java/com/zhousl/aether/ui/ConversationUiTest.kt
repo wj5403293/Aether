@@ -168,6 +168,32 @@ class ConversationUiTest {
     }
 
     @Test
+    fun runningWorkDurationAdvancesFromRecordedStartTime() {
+        assertEquals(
+            5_000L,
+            runningWorkDurationMillis(
+                startedAtMillis = 10_000L,
+                fallbackStartedRealtimeMillis = 1_000L,
+                nowMillis = 15_000L,
+                nowRealtimeMillis = 1_000L,
+            ),
+        )
+    }
+
+    @Test
+    fun runningWorkDurationUsesStableFallbackStartTime() {
+        assertEquals(
+            4_000L,
+            runningWorkDurationMillis(
+                startedAtMillis = null,
+                fallbackStartedRealtimeMillis = 2_000L,
+                nowMillis = 20_000L,
+                nowRealtimeMillis = 6_000L,
+            ),
+        )
+    }
+
+    @Test
     fun reasoningTimelineKeepsSummaryAndToolsInRecordedOrder() {
         val trace = ReasoningTrace(
             id = "reasoning-1",

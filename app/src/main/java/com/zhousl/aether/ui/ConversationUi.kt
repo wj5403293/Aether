@@ -1116,25 +1116,27 @@ private fun PendingAssistantTimeline(
                 onDetachSurface = onDetachAgentModePreviewSurface,
             )
         } else if (visiblePendingInvocations.isNotEmpty()) {
+            val pendingToolsStartedAtMillis = visiblePendingInvocations
+                .mapNotNull { it.startedAtMillis.takeIf { timestamp -> timestamp > 0L } }
+                .plus(listOfNotNull(activeTurnStartedAtMillis?.takeIf { it > 0L }))
+                .filter { it >= MinimumWallClockMillis }
+                .minOrNull()
+            val pendingToolsFallbackStartedRealtimeMillis = remember(pendingToolInvocationStateKey) {
+                SystemClock.elapsedRealtime()
+            }
             val pendingToolsDurationMillis by produceState(
-                initialValue = workDurationMillisForToolInvocations(visiblePendingInvocations),
-                visiblePendingInvocations,
+                initialValue = runningWorkDurationMillis(
+                    startedAtMillis = pendingToolsStartedAtMillis,
+                    fallbackStartedRealtimeMillis = pendingToolsFallbackStartedRealtimeMillis,
+                ),
+                pendingToolsStartedAtMillis,
+                pendingToolsFallbackStartedRealtimeMillis,
             ) {
-                val recordedStartedAtMillis = visiblePendingInvocations
-                    .mapNotNull { it.startedAtMillis.takeIf { timestamp -> timestamp > 0L } }
-                    .plus(listOfNotNull(activeTurnStartedAtMillis?.takeIf { it > 0L }))
-                    .filter { it >= MinimumWallClockMillis }
-                    .minOrNull()
-                val startedRealtimeMillis = SystemClock.elapsedRealtime()
                 while (true) {
-                    value = if (recordedStartedAtMillis != null) {
-                        workDurationMillisForToolInvocations(
-                            visiblePendingInvocations,
-                            endAtMillis = System.currentTimeMillis(),
-                        )
-                    } else {
-                        fallbackDurationMillis(startedRealtimeMillis)
-                    }
+                    value = runningWorkDurationMillis(
+                        startedAtMillis = pendingToolsStartedAtMillis,
+                        fallbackStartedRealtimeMillis = pendingToolsFallbackStartedRealtimeMillis,
+                    )
                     kotlinx.coroutines.delay(1_000L)
                 }
             }
@@ -1164,18 +1166,26 @@ private fun PendingAssistantTimeline(
         return
     }
 
-    val workingDurationMillis by produceState(initialValue = workDurationMillisForBlocks(blocks), blocks.firstOrNull()?.id) {
-        val recordedStartedAtMillis = listOfNotNull(
-            blocks.workStartedAtMillis(),
-            activeTurnStartedAtMillis?.takeIf { it >= MinimumWallClockMillis },
-        ).minOrNull()
-        val startedRealtimeMillis = SystemClock.elapsedRealtime()
+    val workStartedAtMillis = listOfNotNull(
+        blocks.workStartedAtMillis(),
+        activeTurnStartedAtMillis?.takeIf { it >= MinimumWallClockMillis },
+    ).minOrNull()
+    val fallbackWorkStartedRealtimeMillis = remember(activeTurnStartedAtMillis) {
+        SystemClock.elapsedRealtime()
+    }
+    val workingDurationMillis by produceState(
+        initialValue = runningWorkDurationMillis(
+            startedAtMillis = workStartedAtMillis,
+            fallbackStartedRealtimeMillis = fallbackWorkStartedRealtimeMillis,
+        ),
+        workStartedAtMillis,
+        fallbackWorkStartedRealtimeMillis,
+    ) {
         while (true) {
-            value = if (recordedStartedAtMillis != null) {
-                workDurationMillisForBlocks(blocks, endAtMillis = System.currentTimeMillis())
-            } else {
-                fallbackDurationMillis(startedRealtimeMillis)
-            }
+            value = runningWorkDurationMillis(
+                startedAtMillis = workStartedAtMillis,
+                fallbackStartedRealtimeMillis = fallbackWorkStartedRealtimeMillis,
+            )
             kotlinx.coroutines.delay(1_000L)
         }
     }
@@ -1350,8 +1360,17 @@ private fun List<AssistantResponseBlock>.workStartedAtMillis(): Long? =
         .filter { it >= MinimumWallClockMillis }
         .minOrNull()
 
-private fun fallbackDurationMillis(startedRealtimeMillis: Long): Long =
-    (SystemClock.elapsedRealtime() - startedRealtimeMillis).coerceAtLeast(1_000L)
+internal fun runningWorkDurationMillis(
+    startedAtMillis: Long?,
+    fallbackStartedRealtimeMillis: Long,
+    nowMillis: Long = System.currentTimeMillis(),
+    nowRealtimeMillis: Long = SystemClock.elapsedRealtime(),
+): Long =
+    if (startedAtMillis != null) {
+        (nowMillis - startedAtMillis).coerceAtLeast(1_000L)
+    } else {
+        (nowRealtimeMillis - fallbackStartedRealtimeMillis).coerceAtLeast(1_000L)
+    }
 
 private fun buildConversationListItems(
     messages: List<ChatMessage>,
