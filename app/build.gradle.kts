@@ -37,13 +37,21 @@ android {
     defaultConfig {
         applicationId = "com.baimoqilin.aether"
         minSdk = 26
-        targetSdk = 35
+        // Alpine/Termux-style local runtimes install executable ELF files into app-private
+        // storage. Android blocks execve() from that location for targetSdk >= 29.
+        targetSdk = 28
         versionCode = 7
         versionName = "1.6.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
             useSupportLibrary = true
+        }
+
+        externalNativeBuild {
+            cmake {
+                cppFlags += "-std=c++17"
+            }
         }
 
         buildConfigField("String", "POSTHOG_API_KEY", "\"${localProperties.getProperty("posthog.apiKey", "")}\"")
@@ -71,6 +79,15 @@ android {
         compose = true
         aidl = true
     }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
+    }
+
+    ndkVersion = "27.2.12479018"
 
     packaging {
         resources {
@@ -115,6 +132,9 @@ dependencies {
     testImplementation(libs.junit4)
     testImplementation(libs.squareup.okhttp.mockwebserver)
     testImplementation(libs.json)
+
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
 }
 
 tasks.withType<PostHogCliExecTask>().configureEach {

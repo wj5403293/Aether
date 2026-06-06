@@ -118,6 +118,37 @@ enum class AgentWorkspaceMode(
     }
 }
 
+enum class LocalRuntimeId(
+    val storageValue: String,
+    val displayName: String,
+) {
+    Termux(
+        storageValue = "termux",
+        displayName = "Termux",
+    ),
+    Alpine(
+        storageValue = "alpine",
+        displayName = "Alpine",
+    );
+
+    companion object {
+        fun fromStorage(value: String?): LocalRuntimeId? =
+            entries.firstOrNull { it.storageValue == value }
+    }
+}
+
+data class PackageProfileState(
+    val profileId: String,
+    val installed: Boolean = false,
+    val installedAtMillis: Long = 0L,
+    val lastError: String = "",
+)
+
+data class AlpineEnvironmentVariable(
+    val name: String,
+    val value: String,
+)
+
 data class AppSettings(
     val provider: LlmProvider = LlmProvider.OpenAiCompatible,
     val apiKey: String = "",
@@ -135,6 +166,11 @@ data class AppSettings(
     val termuxSetupNoticeDismissed: Boolean = false,
     val termuxLiveOutputEnabled: Boolean = true,
     val termuxEnvironmentVariables: List<TermuxEnvironmentVariable> = emptyList(),
+    val enabledRuntimeIds: Set<LocalRuntimeId> = emptySet(),
+    val defaultRuntimeId: LocalRuntimeId? = null,
+    val alpineSetupCompleted: Boolean = false,
+    val alpinePackageProfiles: Map<String, PackageProfileState> = emptyMap(),
+    val alpineEnvironmentVariables: List<AlpineEnvironmentVariable> = emptyList(),
     val agentModeAuthorizationEnabled: Boolean = false,
     val agentModeAuthorizationMethod: AgentModeAuthorizationMethod = AgentModeAuthorizationMethod.Shizuku,
     val language: AppLanguage = defaultAppLanguage(),
