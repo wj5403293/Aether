@@ -22,6 +22,9 @@ import com.zhousl.aether.data.SessionExecutionManager
 import com.zhousl.aether.data.SettingsRepository
 import com.zhousl.aether.data.WebToolsClient
 import com.zhousl.aether.data.WorkspaceFileBridge
+import com.zhousl.aether.runtime.AlpineRuntime
+import com.zhousl.aether.runtime.RuntimeRouter
+import com.zhousl.aether.runtime.TermuxRuntime
 import com.zhousl.aether.termux.TermuxBashTool
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
@@ -96,6 +99,15 @@ class AetherAppRuntime(
         context = application,
         diagnosticLogger = diagnosticLogger,
     )
+    val termuxRuntime = TermuxRuntime(bashTool)
+    val alpineRuntime = AlpineRuntime(
+        context = application,
+        diagnosticLogger = diagnosticLogger,
+    )
+    val runtimeRouter = RuntimeRouter(
+        termuxRuntime = termuxRuntime,
+        alpineRuntime = alpineRuntime,
+    )
     val rootSetupController = RootSetupController(
         context = application,
         bashTool = bashTool,
@@ -137,6 +149,7 @@ class AetherAppRuntime(
         extensionsRepository = extensionsRepository,
         chatStateStore = chatStateStore,
         bashTool = bashTool,
+        runtimeRouter = runtimeRouter,
         workspaceFileBridge = workspaceFileBridge,
         rootSetupController = rootSetupController,
         agentModeController = agentModeController,

@@ -5,6 +5,8 @@ import android.os.SystemClock
 import com.zhousl.aether.AetherForegroundService
 import com.zhousl.aether.AetherNotificationController
 import com.zhousl.aether.AppForegroundTracker
+import com.zhousl.aether.runtime.RuntimeRouter
+import com.zhousl.aether.runtime.RuntimeShellTool
 import com.zhousl.aether.termux.TermuxBashTool
 import com.zhousl.aether.ui.AttachmentKind
 import com.zhousl.aether.ui.AssistantResponseBlock
@@ -113,6 +115,7 @@ class SessionExecutionManager(
     private val extensionsRepository: AgentExtensionsRepository,
     private val chatStateStore: ChatStateStore,
     private val bashTool: TermuxBashTool,
+    private val runtimeRouter: RuntimeRouter,
     private val workspaceFileBridge: WorkspaceFileBridge,
     private val rootSetupController: RootSetupController,
     private val agentModeController: AgentModeController,
@@ -278,8 +281,9 @@ class SessionExecutionManager(
         handle.job?.cancel(CancellationException("Paused by user."))
         if (runningRunIds.isNotEmpty()) {
             scope.launch(Dispatchers.IO) {
+                val shellTool = RuntimeShellTool(runtimeRouter)
                 runningRunIds.forEach { runId ->
-                    runCatching { bashTool.killExecutionByRunId(runId) }
+                    runCatching { shellTool.killByRunId(runId) }
                 }
             }
         }
@@ -438,12 +442,13 @@ class SessionExecutionManager(
             ),
         )
         val mcpClientManager = McpClientManager(
-            bashTool = bashTool,
+            runtimeRouter = runtimeRouter,
+            settings = request.settings,
             diagnosticLogger = diagnosticLogger,
         )
         val agent = AetherAgent(
             client = OpenAiCompatibleClient(diagnosticLogger = diagnosticLogger),
-            bashTool = bashTool,
+            runtimeRouter = runtimeRouter,
             workspaceFileBridge = workspaceFileBridge,
             agentModeController = agentModeController,
             skillManager = skillManager,
@@ -499,6 +504,10 @@ class SessionExecutionManager(
                 sessionId = handle.sessionId,
                 mode = request.settings.agentWorkspaceMode,
             )
+            val runtimeWorkspaceDirectory = runtimeRouter.runtimeWorkspaceDirectory(
+                settings = request.settings,
+                sharedTermuxWorkspace = workspaceDirectory,
+            )
             diagnosticLogger.event(
                 category = "mcp",
                 event = "sync_start",
@@ -506,12 +515,12 @@ class SessionExecutionManager(
                 turnId = turnId,
                 details = mapOf(
                     "server_count" to resolvedMcpServers.size,
-                    "workspace_directory" to workspaceDirectory,
+                    "workspace_directory" to runtimeWorkspaceDirectory,
                 ),
             )
             mcpClientManager.syncServers(
                 servers = resolvedMcpServers,
-                workspaceDirectory = workspaceDirectory,
+                workspaceDirectory = runtimeWorkspaceDirectory,
             )
             diagnosticLogger.event(
                 category = "mcp",
@@ -537,7 +546,7 @@ class SessionExecutionManager(
             val result = agent.runTurn(
                 settings = request.settings,
                 messages = buildRequestMessages(request.requestMessages),
-                workspaceDirectory = workspaceDirectory,
+                workspaceDirectory = runtimeWorkspaceDirectory,
                 availableSkills = resolvedAvailableSkills,
                 activeSkills = resolvedActiveSkills,
                 mcpToolBindings = mcpClientManager.toolBindings(),

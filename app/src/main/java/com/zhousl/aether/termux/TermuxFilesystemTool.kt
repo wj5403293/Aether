@@ -8,8 +8,21 @@ private const val DefaultSearchResultLimit = 200
 private const val DefaultLsEntryLimit = 200
 
 class TermuxFilesystemTool(
-    private val bashTool: TermuxBashTool,
+    private val commandExecutor: ShellCommandExecutor,
+    private val homeDirectory: String = TermuxContract.HomeDirectory,
 ) {
+    constructor(
+        bashTool: TermuxBashTool,
+    ) : this(
+        commandExecutor = object : ShellCommandExecutor {
+            override suspend fun executeCommand(
+                command: String,
+                workingDirectory: String,
+            ): String = bashTool.executeCommand(command, workingDirectory)
+        },
+        homeDirectory = TermuxContract.HomeDirectory,
+    )
+
     suspend fun executeRead(argumentsJson: String): String {
         val arguments = parseArguments(argumentsJson) ?: return invalidArguments("Arguments were not valid JSON.")
         val path = arguments.optString("path").trim()
@@ -20,7 +33,7 @@ class TermuxFilesystemTool(
         val workingDirectory = normalizeTermuxPath(
             arguments.optString("workingDirectory").trim()
                 .ifBlank { arguments.optString("working_directory").trim() }
-                .ifBlank { TermuxContract.HomeDirectory }
+                .ifBlank { homeDirectory }
         )
         val resolvedPath = normalizeTermuxPath(path)
 
@@ -83,7 +96,7 @@ class TermuxFilesystemTool(
         val workingDirectory = normalizeTermuxPath(
             arguments.optString("workingDirectory").trim()
                 .ifBlank { arguments.optString("working_directory").trim() }
-                .ifBlank { TermuxContract.HomeDirectory }
+                .ifBlank { homeDirectory }
         )
         val resolvedPath = normalizeTermuxPath(path)
 
@@ -129,7 +142,7 @@ class TermuxFilesystemTool(
         val workingDirectory = normalizeTermuxPath(
             arguments.optString("workingDirectory").trim()
                 .ifBlank { arguments.optString("working_directory").trim() }
-                .ifBlank { TermuxContract.HomeDirectory }
+                .ifBlank { homeDirectory }
         )
         val resolvedPath = normalizeTermuxPath(path)
 
@@ -198,7 +211,7 @@ class TermuxFilesystemTool(
         val workingDirectory = normalizeTermuxPath(
             arguments.optString("workingDirectory").trim()
                 .ifBlank { arguments.optString("working_directory").trim() }
-                .ifBlank { TermuxContract.HomeDirectory }
+                .ifBlank { homeDirectory }
         )
         val resolvedPath = normalizeTermuxPath(path)
 
@@ -254,7 +267,7 @@ class TermuxFilesystemTool(
         val workingDirectory = normalizeTermuxPath(
             arguments.optString("workingDirectory").trim()
                 .ifBlank { arguments.optString("working_directory").trim() }
-                .ifBlank { TermuxContract.HomeDirectory }
+                .ifBlank { homeDirectory }
         )
         val resolvedPath = normalizeTermuxPath(path)
 
@@ -319,7 +332,7 @@ class TermuxFilesystemTool(
         val workingDirectory = normalizeTermuxPath(
             arguments.optString("workingDirectory").trim()
                 .ifBlank { arguments.optString("working_directory").trim() }
-                .ifBlank { TermuxContract.HomeDirectory }
+                .ifBlank { homeDirectory }
         )
         val resolvedPath = normalizeTermuxPath(path)
 
@@ -383,7 +396,7 @@ class TermuxFilesystemTool(
         workingDirectory: String,
         script: String,
     ): StructuredScriptExecution {
-        val raw = parseArguments(bashTool.executeCommand(script, workingDirectory))
+        val raw = parseArguments(commandExecutor.executeCommand(script, workingDirectory))
             ?: return StructuredScriptExecution(
                 errorJson = buildToolError(
                     commandSummary = commandSummary,
@@ -941,8 +954,8 @@ class TermuxFilesystemTool(
         "\"" + value.replace("\"", "\\\"") + "\""
 
     private fun normalizeTermuxPath(path: String): String = when {
-        path == "~" -> TermuxContract.HomeDirectory
-        path.startsWith("~/") -> TermuxContract.HomeDirectory + path.removePrefix("~")
+        path == "~" -> homeDirectory
+        path.startsWith("~/") -> homeDirectory + path.removePrefix("~")
         else -> path
     }
 
@@ -958,6 +971,13 @@ class TermuxFilesystemTool(
         builder.appendLine("  printf '%s=%s\\n' \"\$1\" \"\$2\"")
         builder.appendLine("}")
     }
+}
+
+fun interface ShellCommandExecutor {
+    suspend fun executeCommand(
+        command: String,
+        workingDirectory: String,
+    ): String
 }
 
 private data class TextEdit(

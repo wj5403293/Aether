@@ -26,6 +26,7 @@ private const val ManagedCommandWatchWindowSeconds = 45
 private const val DefaultManagedLogTailBytes = 12 * 1024
 private const val MaxManagedLogTailBytes = 64 * 1024
 private const val InternalCommandTimeoutMillis = 15_000L
+private const val SharedWorkspaceRoot = "${TermuxContract.HomeDirectory}/.aether/workspace"
 private const val SessionWorkspaceRoot = "${TermuxContract.HomeDirectory}/.aether/workspaces"
 private const val TermuxLogTag = "AetherTermux"
 private val EnableTermuxLogging: Boolean
@@ -543,7 +544,7 @@ class TermuxBashTool(
         workingDirectory: String,
     ): JSONObject? {
         val normalizedWorkingDirectory = normalizeTermuxPath(workingDirectory)
-        if (!shouldPrepareWorkingDirectory(normalizedWorkingDirectory)) return null
+        if (!shouldPrepareTermuxWorkingDirectory(normalizedWorkingDirectory)) return null
 
         val raw = runCatching {
             JSONObject(
@@ -567,11 +568,6 @@ class TermuxBashTool(
         path.startsWith("~/") -> TermuxContract.HomeDirectory + path.removePrefix("~")
         else -> path
     }
-
-    private fun shouldPrepareWorkingDirectory(
-        workingDirectory: String,
-    ): Boolean = workingDirectory == SessionWorkspaceRoot ||
-        workingDirectory.startsWith("$SessionWorkspaceRoot/")
 
     private fun buildEnsureDirectoryScript(
         workingDirectory: String,
@@ -1178,6 +1174,13 @@ internal fun appendTermuxShellEnvironment(
 
 private fun escapeTermuxEnvValue(value: String): String =
     value.replace("'", "'\"'\"'")
+
+internal fun shouldPrepareTermuxWorkingDirectory(
+    workingDirectory: String,
+): Boolean = workingDirectory == SharedWorkspaceRoot ||
+    workingDirectory.startsWith("$SharedWorkspaceRoot/") ||
+    workingDirectory == SessionWorkspaceRoot ||
+    workingDirectory.startsWith("$SessionWorkspaceRoot/")
 
 internal object TermuxContract {
     const val PackageName = "com.termux"

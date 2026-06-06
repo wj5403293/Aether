@@ -130,7 +130,23 @@ class AetherSelfManagementTool(
                 put("connect_timeout_millis", JSONObject().apply { put("type", "integer") })
                 put("request_timeout_millis", JSONObject().apply { put("type", "integer") })
                 put("headers", keyValueArraySchema("HTTP headers for streamable HTTP MCP servers."))
-                put("environment", keyValueArraySchema("Environment variables for stdio MCP servers."))
+                put("environment", stdioEnvironmentSchema())
+                put(
+                    "runtime",
+                    JSONObject().apply {
+                        put("type", "string")
+                        put("enum", JSONArray(listOf("default", "termux", "alpine")))
+                        put("description", "Alias for runtime_environment.")
+                    },
+                )
+                put(
+                    "runtime_environment",
+                    JSONObject().apply {
+                        put("type", "string")
+                        put("enum", JSONArray(listOf("default", "termux", "alpine")))
+                        put("description", "Runtime for stdio MCP servers. Omit or use default to follow the user's runtime default.")
+                    },
+                )
             },
             required = listOf("action"),
         ),
@@ -539,6 +555,17 @@ class AetherSelfManagementTool(
                             (existing?.transport as? McpTransportConfig.StdIo)?.workingDirectory.orEmpty()
                         },
                     environment = parseKeyValues(arguments.optJSONArray("environment")),
+                    runtimeEnvironment = LocalRuntimeId.fromStorage(
+                        arguments.optString("runtime_environment").trim()
+                            .ifBlank { arguments.optString("runtimeEnvironment").trim() }
+                            .ifBlank { arguments.optString("runtime").trim() }
+                            .ifBlank {
+                                arguments.opt("environment")
+                                    .takeIf { it is String }
+                                    ?.toString()
+                                    .orEmpty()
+                            }
+                    ) ?: (existing?.transport as? McpTransportConfig.StdIo)?.runtimeEnvironment,
                 )
             }
         }
@@ -878,6 +905,7 @@ class AetherSelfManagementTool(
                     put("arguments", JSONArray().apply { transport.arguments.forEach(::put) })
                     put("working_directory", transport.workingDirectory)
                     put("environment", keyValuesJson(transport.environment, redactValues = true))
+                    transport.runtimeEnvironment?.let { put("runtime_environment", it.storageValue) }
                 }
             }
         }
@@ -1000,6 +1028,26 @@ class AetherSelfManagementTool(
                     )
                     put("required", JSONArray(listOf("key", "value")))
                     put("additionalProperties", false)
+                },
+            )
+        }
+
+    private fun stdioEnvironmentSchema(): JSONObject =
+        JSONObject().apply {
+            put(
+                "description",
+                "Runtime environment for stdio MCP servers when provided as a string, or environment variables when provided as an array.",
+            )
+            put(
+                "oneOf",
+                JSONArray().apply {
+                    put(
+                        JSONObject().apply {
+                            put("type", "string")
+                            put("enum", JSONArray(listOf("default", "termux", "alpine")))
+                        },
+                    )
+                    put(keyValueArraySchema("Environment variables for stdio MCP servers."))
                 },
             )
         }

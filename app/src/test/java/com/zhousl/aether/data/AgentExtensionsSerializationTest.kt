@@ -88,6 +88,7 @@ class AgentExtensionsSerializationTest {
                     environment = listOf(
                         McpKeyValue("DEBUG", "1"),
                     ),
+                    runtimeEnvironment = LocalRuntimeId.Alpine,
                 ),
                 isEnabled = false,
             ),
@@ -106,6 +107,35 @@ class AgentExtensionsSerializationTest {
             listOf("--profile", "demo"),
             (reparsed[1].transport as McpTransportConfig.StdIo).arguments,
         )
+        assertEquals(
+            LocalRuntimeId.Alpine,
+            (reparsed[1].transport as McpTransportConfig.StdIo).runtimeEnvironment,
+        )
+    }
+
+    @Test
+    fun stdioMcpParsesStringEnvironmentAsRuntimeAlias() {
+        val raw = """
+            [
+              {
+                "id": "server-stdio",
+                "displayName": "Local",
+                "transport": {
+                  "type": "stdio",
+                  "command": "python",
+                  "arguments": ["server.py"],
+                  "workingDirectory": "/workspace",
+                  "environment": "alpine"
+                }
+              }
+            ]
+        """.trimIndent()
+
+        val reparsed = parseMcpServerConfigs(raw)
+        val transport = reparsed.single().transport as McpTransportConfig.StdIo
+
+        assertEquals(LocalRuntimeId.Alpine, transport.runtimeEnvironment)
+        assertEquals(emptyList<McpKeyValue>(), transport.environment)
     }
 
     @Test

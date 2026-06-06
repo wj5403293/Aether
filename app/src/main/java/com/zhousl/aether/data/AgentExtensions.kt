@@ -114,6 +114,7 @@ sealed interface McpTransportConfig {
         val arguments: List<String> = emptyList(),
         val workingDirectory: String = "",
         val environment: List<McpKeyValue> = emptyList(),
+        val runtimeEnvironment: LocalRuntimeId? = null,
     ) : McpTransportConfig {
         override val transportType: McpTransportType = McpTransportType.StdIo
     }
@@ -208,6 +209,7 @@ internal fun McpTransportConfig.toJson(): JSONObject = JSONObject().apply {
             put("arguments", JSONArray().apply { arguments.forEach(::put) })
             put("workingDirectory", workingDirectory)
             put("environment", JSONArray().apply { environment.forEach { put(it.toJson()) } })
+            runtimeEnvironment?.let { put("runtimeEnvironment", it.storageValue) }
         }
 
         is McpTransportConfig.StreamableHttp -> {
@@ -363,13 +365,23 @@ private fun parseSkillResourceEntries(array: JSONArray?): List<SkillResourceEntr
 
 private fun parseMcpTransportConfig(json: JSONObject): McpTransportConfig? =
     when (McpTransportType.fromStorage(json.optString("type"))) {
-        McpTransportType.StdIo -> McpTransportConfig.StdIo(
-            command = json.optString("command"),
-            arguments = json.optJSONArray("arguments").toStringList()
-                .ifEmpty { json.optJSONArray("args").toStringList() },
-            workingDirectory = json.optString("workingDirectory"),
-            environment = parseKeyValues(json.optJSONArray("environment")),
-        )
+        McpTransportType.StdIo -> {
+            val environmentValue = json.opt("environment")
+            McpTransportConfig.StdIo(
+                command = json.optString("command"),
+                arguments = json.optJSONArray("arguments").toStringList()
+                    .ifEmpty { json.optJSONArray("args").toStringList() },
+                workingDirectory = json.optString("workingDirectory"),
+                environment = parseKeyValues(environmentValue as? JSONArray),
+                runtimeEnvironment = LocalRuntimeId.fromStorage(
+                    json.optString("runtimeEnvironment").ifBlank {
+                        json.optString("runtime_environment")
+                    }.ifBlank {
+                        environmentValue as? String ?: ""
+                    },
+                ),
+            )
+        }
 
         McpTransportType.StreamableHttp -> McpTransportConfig.StreamableHttp(
             url = json.optString("url"),

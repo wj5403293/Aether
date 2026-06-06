@@ -1,8 +1,8 @@
 package com.zhousl.aether.data
 
 import android.util.Log
-import com.zhousl.aether.termux.TermuxBashTool
-import com.zhousl.aether.termux.TermuxContract
+import com.zhousl.aether.runtime.LocalRuntime
+import com.zhousl.aether.runtime.RuntimeRouter
 import java.io.IOException
 import java.util.Base64
 import java.util.UUID
@@ -142,7 +142,8 @@ class DenyingMcpClientCallbacks : McpClientCallbacks {
 }
 
 class McpClientManager(
-    private val bashTool: TermuxBashTool,
+    private val runtimeRouter: RuntimeRouter,
+    private val settings: AppSettings,
     private val callbacks: McpClientCallbacks = DenyingMcpClientCallbacks(),
     private val diagnosticLogger: AetherDiagnosticLogger = AetherDiagnosticLogger.NoOp,
     private val httpClient: OkHttpClient = OkHttpClient.Builder()
@@ -200,11 +201,16 @@ class McpClientManager(
         server: McpServerConfig,
         workspaceDirectory: String,
         operation: McpServerTestOperation,
+        settings: AppSettings = this.settings,
     ): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
             val testSession = McpServerSession(
                 config = server.copy(isEnabled = true),
-                transport = createTransport(server.copy(isEnabled = true), workspaceDirectory),
+                transport = createTransport(
+                    server = server.copy(isEnabled = true),
+                    workspaceDirectory = workspaceDirectory,
+                    settings = settings,
+                ),
                 workspaceDirectory = workspaceDirectory,
                 callbacks = callbacks,
                 diagnosticLogger = diagnosticLogger,
@@ -503,12 +509,19 @@ class McpClientManager(
     private fun createTransport(
         server: McpServerConfig,
         workspaceDirectory: String,
+        settings: AppSettings = this.settings,
     ): McpSessionTransport = when (val transportConfig = server.transport) {
         is McpTransportConfig.StdIo -> StdIoMcpTransport(
             serverId = server.id,
             config = transportConfig,
             workspaceDirectory = workspaceDirectory,
-            bashTool = bashTool,
+            runtime = runtimeRouter.runtimeFor(
+                settings = settings,
+                environment = transportConfig.runtimeEnvironment?.storageValue,
+            ) ?: error(
+                "No local runtime is configured for stdio MCP server '${server.displayName}'. " +
+                    "Configure Alpine or Termux in Settings, or choose a runtime in this MCP server's stdio settings."
+            ),
         )
 
         is McpTransportConfig.StreamableHttp -> StreamableHttpMcpTransport(
@@ -1177,7 +1190,7 @@ private class StdIoMcpTransport(
     private val serverId: String,
     private val config: McpTransportConfig.StdIo,
     private val workspaceDirectory: String,
-    private val bashTool: TermuxBashTool,
+    private val runtime: LocalRuntime,
 ) : McpSessionTransport {
     private var runId: String = ""
     private var logOffset: Long = 0L
@@ -1185,10 +1198,10 @@ private class StdIoMcpTransport(
 
     override suspend fun open() {
         val launchResult = JSONObject(
-            bashTool.execute(
+            runtime.execute(
                 JSONObject().apply {
                     put("command", buildBrokerScript())
-                    put("working_directory", TermuxContract.HomeDirectory)
+                    put("working_directory", runtime.homeDirectory)
                 }.toString(),
             ),
         )
@@ -1202,7 +1215,7 @@ private class StdIoMcpTransport(
         logMcp("[$serverId] send ${describeMcpMessage(message)}")
         val payloadBase64 = encodeBase64(message.toString())
         val command = buildString {
-            appendLine("set -euo pipefail")
+            appendLine("set -eu")
             appendLine("root='${brokerRootPath()}'")
             appendLine("mkdir -p \"\$root/inbox\"")
             appendLine("payload=\"\$(printf '%s' '$payloadBase64' | base64 -d)\"")
@@ -1211,7 +1224,7 @@ private class StdIoMcpTransport(
             appendLine("printf '%s' \"\$payload\" > \"\$temp_request_path\"")
             appendLine("mv \"\$temp_request_path\" \"\$request_path\"")
         }
-        val rawResult = JSONObject(bashTool.executeCommand(command))
+        val rawResult = JSONObject(runtime.executeCommand(command, runtime.homeDirectory))
         if (!rawResult.optBoolean("ok")) {
             error(rawResult.optString("errmsg").ifBlank { "Couldn't write to the MCP broker inbox." })
         }
@@ -1219,8 +1232,10 @@ private class StdIoMcpTransport(
     }
 
     override suspend fun pollMessages(): List<JSONObject> {
+        val pollTempPath = "${brokerRootPath()}/.poll-${UUID.randomUUID()}.tmp"
+        val completePollTempPath = "${brokerRootPath()}/.poll-complete-${UUID.randomUUID()}.tmp"
         val command = buildString {
-            appendLine("set -euo pipefail")
+            appendLine("set -eu")
             appendLine("root='${brokerRootPath()}'")
             appendLine("events_path=\"\$root/events.jsonl\"")
             appendLine("stderr_path=\"\$root/stderr.log\"")
@@ -1238,7 +1253,7 @@ private class StdIoMcpTransport(
             appendLine("processed_count=\$(find \"\$root/processed\" -maxdepth 1 -type f -name '*.json' 2>/dev/null | wc -l | tr -d '[:space:]')")
             appendLine("stderr_b64=''")
             appendLine("if [ -f \"\$stderr_path\" ]; then")
-            appendLine("  stderr_b64=\"\$(tail -c 4096 -- \"\$stderr_path\" 2>/dev/null | base64 | tr -d '\\n')\"")
+            appendLine("  stderr_b64=\"\$(tail -c 4096 \"\$stderr_path\" 2>/dev/null | base64 | tr -d '\\n')\"")
             appendLine("fi")
             appendLine("if [ ! -f \"\$events_path\" ]; then")
             appendLine("  printf 'offset=%s\\n' \"\$current_offset\"")
@@ -1262,18 +1277,18 @@ private class StdIoMcpTransport(
             appendLine("  exit 0")
             appendLine("fi")
             appendLine("byte_count=\$((size - current_offset))")
-            appendLine("chunk=\"\$(dd if=\"\$events_path\" bs=1 skip=\"\$current_offset\" count=\"\$byte_count\" status=none 2>/dev/null; printf '\\037')\"")
-            appendLine("chunk=\"\${chunk%\$'\\037'}\"")
-            appendLine("complete_chunk=''")
-            appendLine("case \"\$chunk\" in")
-            appendLine("  *$'\\n')")
-            appendLine("    complete_chunk=\"\$chunk\"")
-            appendLine("    ;;")
-            appendLine("  *$'\\n'*)")
-            appendLine("    complete_chunk=\"\${chunk%$'\\n'*}\"\$'\\n'")
-            appendLine("    ;;")
-            appendLine("esac")
-            appendLine("complete_bytes=\$(printf '%s' \"\$complete_chunk\" | wc -c | tr -d '[:space:]')")
+            appendLine("chunk_path='$pollTempPath'")
+            appendLine("complete_chunk_path='$completePollTempPath'")
+            appendLine("dd if=\"\$events_path\" bs=1 skip=\"\$current_offset\" count=\"\$byte_count\" of=\"\$chunk_path\" 2>/dev/null || true")
+            appendLine("chunk_size=\$(wc -c < \"\$chunk_path\" | tr -d '[:space:]')")
+            appendLine("if [ \"\$chunk_size\" -eq 0 ]; then")
+            appendLine("  : > \"\$complete_chunk_path\"")
+            appendLine("elif [ \"\$(tail -c 1 \"\$chunk_path\" | wc -l | tr -d '[:space:]')\" = \"1\" ]; then")
+            appendLine("  cp \"\$chunk_path\" \"\$complete_chunk_path\"")
+            appendLine("else")
+            appendLine("  sed '\$d' \"\$chunk_path\" > \"\$complete_chunk_path\"")
+            appendLine("fi")
+            appendLine("complete_bytes=\$(wc -c < \"\$complete_chunk_path\" | tr -d '[:space:]')")
             appendLine("next_offset=\$((current_offset + complete_bytes))")
             appendLine("printf 'offset=%s\\n' \"\$next_offset\"")
             appendLine("printf 'server_pid=%s\\n' \"\$server_pid\"")
@@ -1281,9 +1296,10 @@ private class StdIoMcpTransport(
             appendLine("printf 'inbox_count=%s\\n' \"\$inbox_count\"")
             appendLine("printf 'processed_count=%s\\n' \"\$processed_count\"")
             appendLine("printf 'stderr_b64=%s\\n' \"\$stderr_b64\"")
-            appendLine("printf 'events_b64=%s\\n' \"\$(printf '%s' \"\$complete_chunk\" | base64 | tr -d '\\n')\"")
+            appendLine("printf 'events_b64=%s\\n' \"\$(base64 \"\$complete_chunk_path\" | tr -d '\\n')\"")
+            appendLine("rm -f \"\$chunk_path\" \"\$complete_chunk_path\"")
         }
-        val rawResult = JSONObject(bashTool.executeCommand(command))
+        val rawResult = JSONObject(runtime.executeCommand(command, runtime.homeDirectory))
         if (!rawResult.optBoolean("ok")) {
             error(rawResult.optString("errmsg").ifBlank { "Couldn't read from the MCP broker event log." })
         }
@@ -1315,7 +1331,7 @@ private class StdIoMcpTransport(
     override suspend fun close() {
         if (runId.isBlank()) return
         runCatching {
-            bashTool.killExecution(
+            runtime.killExecution(
                 JSONObject().apply {
                     put("run_id", runId)
                 }.toString(),
@@ -1324,70 +1340,67 @@ private class StdIoMcpTransport(
     }
 
     private fun buildBrokerScript(): String = buildString {
-        appendLine("set -euo pipefail")
+        val commandLine = buildCommandLine()
+        appendLine("set -eu")
         appendLine("root='${brokerRootPath()}'")
         appendLine("mkdir -p \"\$root\"")
         appendLine("rm -rf \"\$root/inbox\" \"\$root/processed\"")
-        appendLine("rm -f \"\$root\"/.request-*.tmp \"\$root/server.pid\"")
+        appendLine("rm -f \"\$root\"/.request-*.tmp \"\$root\"/.poll-*.tmp \"\$root/server.pid\"")
         appendLine("mkdir -p \"\$root/inbox\" \"\$root/processed\"")
         appendLine("events_path=\"\$root/events.jsonl\"")
         appendLine("stderr_path=\"\$root/stderr.log\"")
-        appendLine("rm -f \"\$root/server.stdin\" \"\$root/server.stdout\"")
+        appendLine("stdin_fifo=\"\$root/server.stdin\"")
+        appendLine("stdout_fifo=\"\$root/server.stdout\"")
+        appendLine("rm -f \"\$stdin_fifo\" \"\$stdout_fifo\"")
+        appendLine("mkfifo \"\$stdin_fifo\" \"\$stdout_fifo\"")
+        appendLine("exec 5<>\"\$stdin_fifo\"")
+        appendLine("exec 6<>\"\$stdout_fifo\"")
         appendLine(": > \"\$events_path\"")
         appendLine(": > \"\$stderr_path\"")
         config.environment.forEach { keyValue ->
             appendLine("export ${escapeShellName(keyValue.key)}='${escapeForSingleQuoted(keyValue.value)}'")
         }
-        appendLine("command='${escapeForSingleQuoted(config.command)}'")
-        appendLine("arguments=(")
-        config.arguments.forEach { argument ->
-            appendLine("  '${escapeForSingleQuoted(argument)}'")
-        }
-        appendLine(")")
-        appendLine("command_line=\"\$command\"")
-        appendLine("for argument in \"\${arguments[@]}\"; do")
-        appendLine("  printf -v quoted_argument '%q' \"\$argument\"")
-        appendLine("  command_line=\"\$command_line \$quoted_argument\"")
-        appendLine("done")
+        appendLine("command_line='${escapeForSingleQuoted(commandLine)}'")
         appendLine("working_directory='${escapeForSingleQuoted(config.workingDirectory.ifBlank { workspaceDirectory })}'")
-        appendLine("coproc SERVER_PROCESS {")
-        appendLine("  cd \"\$working_directory\"")
-        appendLine("  bash -lc \"\$command_line\" 2>> \"\$stderr_path\"")
-        appendLine("}")
-        appendLine("server_pid=\$SERVER_PROCESS_PID")
-        appendLine("exec {server_stdin_fd}>&\"\${SERVER_PROCESS[1]}\"")
-        appendLine("exec {server_stdout_fd}<&\"\${SERVER_PROCESS[0]}\"")
-        appendLine("stdin_fd=\"\$server_stdin_fd\"")
-        appendLine("stdout_fd=\"\$server_stdout_fd\"")
-        appendLine("printf '%s' \"\$server_pid\" > \"\$root/server.pid\"")
         appendLine("(")
-        appendLine("  while true; do")
+        appendLine("  cd \"\$working_directory\"")
+        appendLine("  /bin/sh -lc \"\$command_line\" < \"\$stdin_fifo\" > \"\$stdout_fifo\" 2>> \"\$stderr_path\"")
+        appendLine(") &")
+        appendLine("server_pid=\$!")
+        appendLine("printf '%s' \"\$server_pid\" > \"\$root/server.pid\"")
+        appendLine("exec 3>\"\$stdin_fifo\"")
+        appendLine("exec 4<\"\$stdout_fifo\"")
+        appendLine("exec 5>&-")
+        appendLine("exec 6<&-")
+        appendLine("trap 'kill \"\$writer_pid\" 2>/dev/null || true; kill \"\$server_pid\" 2>/dev/null || true; rm -f \"\$stdin_fifo\" \"\$stdout_fifo\"' EXIT INT TERM")
+        appendLine("(")
+        appendLine("  while kill -0 \"\$server_pid\" 2>/dev/null; do")
         appendLine("    found=false")
         appendLine("    for request_path in \"\$root\"/inbox/*.json; do")
         appendLine("      [ -f \"\$request_path\" ] || continue")
         appendLine("      found=true")
         appendLine("      payload=\"\$(cat \"\$request_path\")\"")
         appendLine("      payload_bytes=\$(printf '%s' \"\$payload\" | wc -c | tr -d '[:space:]')")
-        appendLine("      printf 'Content-Length: %s\\r\\n\\r\\n%s' \"\$payload_bytes\" \"\$payload\" >&\"\$stdin_fd\"")
+        appendLine("      printf 'Content-Length: %s\\r\\n\\r\\n%s' \"\$payload_bytes\" \"\$payload\" >&3 || exit 0")
         appendLine("      mv \"\$request_path\" \"\$root/processed/\"")
         appendLine("    done")
         appendLine("    [ \"\$found\" = true ] || sleep 0.1")
         appendLine("  done")
         appendLine(") &")
         appendLine("writer_pid=\$!")
+        appendLine("cr=\$(printf '\\r')")
         appendLine("sequence=0")
         appendLine("while true; do")
         appendLine("  content_length=''")
-        appendLine("  while IFS= read -r line <&\"\$stdout_fd\"; do")
-        appendLine("    line=\"\${line%$'\\r'}\"")
+        appendLine("  while IFS= read -r line <&4; do")
+        appendLine("    line=\${line%\"\$cr\"}")
         appendLine("    [ -z \"\$line\" ] && break")
         appendLine("    case \"\$line\" in")
         appendLine("      Content-Length:*) content_length=\"\${line#Content-Length: }\" ;;")
         appendLine("    esac")
         appendLine("  done || break")
         appendLine("  [ -n \"\$content_length\" ] || continue")
-        appendLine("  payload=\"\$(dd bs=1 count=\"\$content_length\" iflag=fullblock 2>/dev/null <&\"\$stdout_fd\"; printf '\\037')\"")
-        appendLine("  payload=\"\${payload%\$'\\037'}\"")
+        appendLine("  payload=\"\$(dd bs=1 count=\"\$content_length\" 2>/dev/null <&4)\"")
         appendLine("  payload_b64=\"\$(printf '%s' \"\$payload\" | base64 | tr -d '\\n')\"")
         appendLine("  sequence=\$((sequence + 1))")
         appendLine("  printf '%s|%s\\n' \"\$sequence\" \"\$payload_b64\" >> \"\$events_path\"")
@@ -1396,8 +1409,19 @@ private class StdIoMcpTransport(
         appendLine("kill \"\$server_pid\" 2>/dev/null || true")
     }
 
+    private fun buildCommandLine(): String =
+        buildString {
+            append(config.command)
+            config.arguments.forEach { argument ->
+                append(' ')
+                append('\'')
+                append(escapeForSingleQuoted(argument))
+                append('\'')
+            }
+        }
+
     private fun brokerRootPath(): String =
-        "${TermuxContract.HomeDirectory}/.aether/mcp-brokers/$serverId"
+        "${runtime.homeDirectory}/.aether/mcp-brokers/$serverId"
 
     private fun logHealth(values: Map<String, String>) {
         val serverPid = values["server_pid"].orEmpty().ifBlank { "?" }

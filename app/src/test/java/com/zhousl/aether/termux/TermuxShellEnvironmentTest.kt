@@ -34,4 +34,16 @@ class TermuxShellEnvironmentTest {
         assertTrue(script.contains("aether_capture_shell_path -lc"))
         assertTrue(script.contains("aether_capture_shell_path -ic"))
     }
+
+    @Test
+    fun onlyAetherWorkspaceDirectoriesArePreparedAutomatically() {
+        assertTrue(
+            shouldPrepareTermuxWorkingDirectory("${TermuxContract.HomeDirectory}/.aether/workspace")
+        )
+        assertTrue(
+            shouldPrepareTermuxWorkingDirectory("${TermuxContract.HomeDirectory}/.aether/workspaces/session")
+        )
+        assertFalse(shouldPrepareTermuxWorkingDirectory(TermuxContract.HomeDirectory))
+        assertFalse(shouldPrepareTermuxWorkingDirectory("${TermuxContract.HomeDirectory}/projects/demo"))
+    }
 }

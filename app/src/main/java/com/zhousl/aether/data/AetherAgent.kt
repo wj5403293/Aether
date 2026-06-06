@@ -1,8 +1,9 @@
 package com.zhousl.aether.data
 
 import android.os.SystemClock
-import com.zhousl.aether.termux.TermuxBashTool
-import com.zhousl.aether.termux.TermuxFilesystemTool
+import com.zhousl.aether.runtime.RuntimeFilesystemTool
+import com.zhousl.aether.runtime.RuntimeRouter
+import com.zhousl.aether.runtime.RuntimeShellTool
 import java.io.File
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
@@ -32,7 +33,7 @@ data class AetherAgentTurnResult(
 
 class AetherAgent(
     private val client: OpenAiCompatibleClient,
-    private val bashTool: TermuxBashTool,
+    private val runtimeRouter: RuntimeRouter,
     private val workspaceFileBridge: WorkspaceFileBridge,
     private val agentModeController: AgentModeController,
     private val skillManager: AgentSkillManager,
@@ -42,7 +43,8 @@ class AetherAgent(
     private val diagnosticLogger: AetherDiagnosticLogger = AetherDiagnosticLogger.NoOp,
     private val onParallelToolCallsUnsupported: suspend (String) -> Unit = {},
 ) {
-    private val filesystemTool = TermuxFilesystemTool(bashTool)
+    private val filesystemTool = RuntimeFilesystemTool(runtimeRouter)
+    private val shellTool = RuntimeShellTool(runtimeRouter)
 
     suspend fun runTurn(
         settings: AppSettings,
@@ -505,29 +507,36 @@ class AetherAgent(
     ): String {
         return when (toolCall.name) {
             "read" -> filesystemTool.executeRead(
+                settings,
                 injectDefaultWorkingDirectory(toolCall.arguments, workspaceDirectory)
             )
             "edit" -> filesystemTool.executeEdit(
+                settings,
                 injectDefaultWorkingDirectory(toolCall.arguments, workspaceDirectory)
             )
             "write" -> filesystemTool.executeWrite(
+                settings,
                 injectDefaultWorkingDirectory(toolCall.arguments, workspaceDirectory)
             )
             "grep" -> filesystemTool.executeGrep(
+                settings,
                 injectDefaultWorkingDirectory(toolCall.arguments, workspaceDirectory)
             )
             "find" -> filesystemTool.executeFind(
+                settings,
                 injectDefaultWorkingDirectory(toolCall.arguments, workspaceDirectory)
             )
             "ls" -> filesystemTool.executeLs(
+                settings,
                 injectDefaultWorkingDirectory(toolCall.arguments, workspaceDirectory)
             )
-            "bash" -> bashTool.execute(
+            "bash" -> shellTool.execute(
+                settings,
                 injectDefaultWorkingDirectory(toolCall.arguments, workspaceDirectory),
                 onProgress = onToolProgress,
             )
-            "fetch_bash_output" -> bashTool.fetchExecution(toolCall.arguments)
-            "kill_bash" -> bashTool.killExecution(toolCall.arguments)
+            "fetch_bash_output" -> shellTool.fetch(settings, toolCall.arguments)
+            "kill_bash" -> shellTool.kill(settings, toolCall.arguments)
             "sleep" -> executeSleep(toolCall.arguments)
             "activate_skill" -> executeActivateSkill(
                 argumentsJson = toolCall.arguments,
@@ -1673,7 +1682,9 @@ class AetherAgent(
                 "If a long-running command is stuck or no longer needed, call kill_bash with the run_id. " +
                 "Use sleep instead of busy waiting. " +
                 "Use bash for shell commands, scripts, and tasks that are not covered by the specialized filesystem tools. " +
-                "If the user asks you to run a bash, shell, terminal, or Termux command, you must call the bash tool instead of describing what they should run manually. " +
+                "Local shell and filesystem tools accept environment='default', 'termux', or 'alpine'. Termux is best for Android and phone integration; Alpine is best for built-in Linux VM, development tools, scripts, and stdio MCP. " +
+                "Termux and Alpine workspaces are separate in v1; do not assume files written in one environment are visible in the other unless you explicitly transfer them. " +
+                "If the user asks you to run a bash, shell, terminal, Termux, or Linux VM command, you must call the bash tool instead of describing what they should run manually. " +
                 "When you create or modify a file that the user should download, include a Markdown link that uses file:// with the absolute workspace path, for example [report.txt](file://$workspaceDirectory/report.txt). " +
                 "Only claim you executed shell commands if you actually called bash. " +
                 "After using tools, summarize the result clearly for the user."
@@ -1960,8 +1971,9 @@ class AetherAgent(
 
     private fun buildReadToolDefinition(): JSONObject = buildToolDefinition(
         name = "read",
-        description = "Read a text file from Termux with optional line-based offset and limit. path accepts ~ or ~/... for the Termux home directory.",
+        description = "Read a text file from the selected local runtime with optional line-based offset and limit. path accepts ~ or ~/... for that runtime's home directory.",
         properties = JSONObject().apply {
+            put("environment", runtimeEnvironmentProperty())
             put("path", stringProperty("The file path to read."))
             put("offset", integerProperty("Optional zero-based line offset to start reading from."))
             put("limit", integerProperty("Optional maximum number of lines to return."))
@@ -1987,8 +1999,9 @@ class AetherAgent(
 
     private fun buildEditToolDefinition(): JSONObject = buildToolDefinition(
         name = "edit",
-        description = "Precisely edit a text file using exact oldText/newText replacements. For one edit use only oldText/newText. For multiple edits use only edits[]. path accepts ~ or ~/... for the Termux home directory.",
+        description = "Precisely edit a text file in the selected local runtime using exact oldText/newText replacements. For one edit use only oldText/newText. For multiple edits use only edits[]. path accepts ~ or ~/... for that runtime's home directory.",
         properties = JSONObject().apply {
+            put("environment", runtimeEnvironmentProperty())
             put("path", stringProperty("The file path to edit."))
             put("oldText", stringProperty("For a single edit only, the exact text to replace. Omit this when using edits[]."))
             put("newText", stringProperty("For a single edit only, the replacement text. Omit this when using edits[]."))
@@ -2031,8 +2044,9 @@ class AetherAgent(
 
     private fun buildWriteToolDefinition(): JSONObject = buildToolDefinition(
         name = "write",
-        description = "Create a new text file or completely overwrite an existing text file. path accepts ~ or ~/... for the Termux home directory.",
+        description = "Create a new text file or completely overwrite an existing text file in the selected local runtime. path accepts ~ or ~/... for that runtime's home directory.",
         properties = JSONObject().apply {
+            put("environment", runtimeEnvironmentProperty())
             put("path", stringProperty("The file path to create or overwrite."))
             put("content", stringProperty("The full file contents to write."))
             put(
@@ -2049,8 +2063,9 @@ class AetherAgent(
 
     private fun buildGrepToolDefinition(): JSONObject = buildToolDefinition(
         name = "grep",
-        description = "Search for text or a regex pattern inside a file or directory tree. path accepts ~ or ~/... for the Termux home directory.",
+        description = "Search for text or a regex pattern inside a file or directory tree in the selected local runtime. path accepts ~ or ~/... for that runtime's home directory.",
         properties = JSONObject().apply {
+            put("environment", runtimeEnvironmentProperty())
             put("path", stringProperty("The file or directory path to search."))
             put("pattern", stringProperty("The text or regex pattern to search for."))
             put("isRegex", booleanProperty("Whether pattern should be treated as a regex."))
@@ -2070,8 +2085,9 @@ class AetherAgent(
 
     private fun buildFindToolDefinition(): JSONObject = buildToolDefinition(
         name = "find",
-        description = "Find files or directories by glob pattern. path accepts ~ or ~/... for the Termux home directory.",
+        description = "Find files or directories by glob pattern in the selected local runtime. path accepts ~ or ~/... for that runtime's home directory.",
         properties = JSONObject().apply {
+            put("environment", runtimeEnvironmentProperty())
             put("path", stringProperty("The directory path to search in."))
             put("pattern", stringProperty("The glob pattern to match, such as *.kt."))
             put(
@@ -2095,8 +2111,9 @@ class AetherAgent(
 
     private fun buildLsToolDefinition(): JSONObject = buildToolDefinition(
         name = "ls",
-        description = "List the contents of a directory or inspect a file path. path accepts ~ or ~/... for the Termux home directory.",
+        description = "List the contents of a directory or inspect a file path in the selected local runtime. path accepts ~ or ~/... for that runtime's home directory.",
         properties = JSONObject().apply {
+            put("environment", runtimeEnvironmentProperty())
             put("path", stringProperty("The file or directory path to list."))
             put("recursive", booleanProperty("Whether to list recursively."))
             put("includeHidden", booleanProperty("Whether to include hidden files and directories."))
@@ -2122,12 +2139,13 @@ class AetherAgent(
                 put("name", "bash")
                 put(
                     "description",
-                    "Execute a bash command inside Termux on the user's Android device. The tool watches the command for up to 45 seconds. If the command is still running after that, it returns status=running, a run_id, and the latest stdout/stderr snapshot without interrupting the command. working_directory accepts ~ or ~/... for the Termux home directory."
+                    "Execute a bash command in the selected local runtime. The tool watches the command for up to 45 seconds. If the command is still running after that, it returns status=running, a runtime-prefixed run_id, and the latest stdout/stderr snapshot without interrupting the command. working_directory accepts ~ or ~/... for that runtime's home directory."
                 )
                 put(
                     "parameters",
                     buildStrictToolParameters(
                         properties = JSONObject().apply {
+                            put("environment", runtimeEnvironmentProperty())
                             put(
                                 "command",
                                 JSONObject().apply {
@@ -2141,7 +2159,7 @@ class AetherAgent(
                                     put("type", "string")
                                     put(
                                         "description",
-                                        "Optional working directory inside Termux, for example ~/.aether/workspaces/<session-id>."
+                                        "Optional working directory inside the selected runtime, for example /workspace or ~/.aether/workspaces/<session-id>."
                                     )
                                 }
                             )
@@ -2166,10 +2184,11 @@ class AetherAgent(
 
     private fun buildFetchBashOutputToolDefinition(): JSONObject = buildToolDefinition(
         name = "fetch_bash_output",
-        description = "Fetch the latest stdout/stderr snapshot and status for a previously started long-running bash command by run_id.",
+        description = "Fetch the latest stdout/stderr snapshot and status for a previously started long-running bash command by runtime-prefixed run_id.",
         properties = JSONObject().apply {
             put("run_id", stringProperty("The run_id returned by bash when it reported status=running."))
             put("runId", stringProperty("Alias of run_id."))
+            put("environment", runtimeEnvironmentProperty())
             put("tail_bytes", integerProperty("Optional maximum number of bytes to return from the end of stdout and stderr."))
             put("tailBytes", integerProperty("Alias of tail_bytes."))
         },
@@ -2178,10 +2197,11 @@ class AetherAgent(
 
     private fun buildKillBashToolDefinition(): JSONObject = buildToolDefinition(
         name = "kill_bash",
-        description = "Stop a previously started long-running bash command by run_id and return its latest logs.",
+        description = "Stop a previously started long-running bash command by runtime-prefixed run_id and return its latest logs.",
         properties = JSONObject().apply {
             put("run_id", stringProperty("The run_id returned by bash when it reported status=running."))
             put("runId", stringProperty("Alias of run_id."))
+            put("environment", runtimeEnvironmentProperty())
             put("tail_bytes", integerProperty("Optional maximum number of bytes to return from the end of stdout and stderr."))
             put("tailBytes", integerProperty("Alias of tail_bytes."))
         },
@@ -2489,6 +2509,10 @@ class AetherAgent(
             },
         )
     }
+
+    private fun runtimeEnvironmentProperty(): JSONObject = stringProperty(
+        "Optional local runtime: default, termux, or alpine. Use alpine for the built-in Linux VM and Termux for Android/phone integration."
+    )
 
     private fun extractMcpServerId(arguments: JSONObject): String =
         arguments.optString("server_id").trim().ifBlank {
