@@ -108,6 +108,24 @@ class AlpineRuntime(
         )
     }
 
+    suspend fun createTerminalLaunchSpec(): AlpineTerminalLaunchSpec = withContext(Dispatchers.IO) {
+        val setup = inspectSetup()
+        if (!setup.isReady) {
+            error(setup.detail.ifBlank { "Alpine runtime is not ready." })
+        }
+        ensureWorkspace()
+        ensureGuestNetworkConfig()
+        val command = buildAlpineInteractiveCommand()
+        AlpineTerminalLaunchSpec(
+            executable = command.first(),
+            arguments = command.toTypedArray(),
+            environment = buildAlpineProcessEnvironment()
+                .map { (key, value) -> "$key=$value" }
+                .toTypedArray(),
+            workingDirectory = runtimeRoot.absolutePath,
+        )
+    }
+
     suspend fun installPackageProfile(profileId: String): LocalRuntimeSetupState {
         val packages = AlpinePackageProfiles[profileId]
             ?: return LocalRuntimeSetupState(
@@ -139,92 +157,9 @@ class AlpineRuntime(
         }
     }
 
-    suspend fun installPackageProfileWithOutput(
-        profileId: String,
-        onOutput: (String) -> Unit,
-    ): LocalRuntimeSetupState {
-        val command = packageProfileInstallCommand(profileId)
-            ?: return LocalRuntimeSetupState(
-                runtimeId = id,
-                issue = LocalRuntimeIssue.Failed,
-                detail = "Unknown Alpine package profile: $profileId",
-            )
-        val setup = inspectSetup()
-        if (!setup.isReady) return setup
-        val result = JSONObject(
-            executeCommand(command, homeDirectory, 10 * 60 * 1000L, onOutput)
-        )
-        return if (result.optBoolean("ok") || verifyPackageProfile(profileId)) {
-            LocalRuntimeSetupState(
-                runtimeId = id,
-                issue = LocalRuntimeIssue.Ready,
-                detail = "Installed Alpine profile $profileId.",
-            )
-        } else {
-            LocalRuntimeSetupState(
-                runtimeId = id,
-                issue = LocalRuntimeIssue.Failed,
-                detail = result.optString("errmsg").ifBlank { result.optString("stderr") },
-            )
-        }
-    }
-
     fun packageProfileInstallCommand(profileId: String): String? {
         val packages = AlpinePackageProfiles[profileId] ?: return null
         return "apk add --no-cache --no-chown ${packages.joinToString(" ")}"
-    }
-
-    suspend fun startInteractiveSession(
-        onOutput: (String) -> Unit,
-    ): AlpineInteractiveSession = withContext(Dispatchers.IO) {
-        val setup = inspectSetup().let { state ->
-            if (state.isReady) state else initialize()
-        }
-        if (!setup.isReady) {
-            error(setup.detail.ifBlank { "Alpine runtime is not ready." })
-        }
-        ensureWorkspace()
-        ensureGuestNetworkConfig()
-        val session = AlpineInteractiveSession(
-            handle = AetherPty.start(
-                command = buildAlpineInteractiveCommand(),
-                environment = buildAlpineProcessEnvironment().map { (name, value) -> "$name=$value" },
-                workingDirectory = runtimeRoot.absolutePath,
-            ),
-        )
-        Thread(
-            {
-                val buffer = ByteArray(4096)
-                val terminalOutput = AlpineTerminalOutputFilter(
-                    onCursorPositionRequest = {
-                        session.send("\u001B[1;1R")
-                    },
-                )
-                runCatching {
-                    while (!session.isStopped) {
-                        val read = AetherPty.read(session.handle, buffer)
-                        if (read <= 0) break
-                        if (read > 0) {
-                            val output = terminalOutput.filter(
-                                String(buffer, 0, read, Charsets.UTF_8),
-                            )
-                            if (output.isNotEmpty()) onOutput(output)
-                        }
-                    }
-                }.onFailure { throwable ->
-                    if (!session.isStopped && session.isAlive) {
-                        onOutput("\n[Aether] Alpine terminal output stopped: ${throwable.message.orEmpty()}\n")
-                    }
-                }.also {
-                    session.markExited()
-                }
-            },
-            "aether-alpine-terminal-output",
-        ).apply {
-            isDaemon = true
-            start()
-        }
-        session
     }
 
     override suspend fun inspectSetup(): LocalRuntimeSetupState = withContext(Dispatchers.IO) {
@@ -953,84 +888,9 @@ private data class RootfsAsset(
     val compressed: Boolean,
 )
 
-private class AlpineTerminalOutputFilter(
-    private val onCursorPositionRequest: () -> Unit,
-) {
-    private var pendingEscape = ""
-
-    fun filter(chunk: String): String {
-        val input = pendingEscape + chunk
-        pendingEscape = ""
-        val output = StringBuilder(input.length)
-        var index = 0
-        while (index < input.length) {
-            val escapeIndex = input.indexOf('\u001B', startIndex = index)
-            if (escapeIndex < 0) {
-                output.append(input, index, input.length)
-                break
-            }
-            output.append(input, index, escapeIndex)
-            when {
-                input.startsWith(CursorPositionRequestSequence, escapeIndex) -> {
-                    onCursorPositionRequest()
-                    index = escapeIndex + CursorPositionRequestSequence.length
-                }
-                CursorPositionRequestSequence.startsWith(input.substring(escapeIndex)) -> {
-                    pendingEscape = input.substring(escapeIndex)
-                    index = input.length
-                }
-                else -> {
-                    output.append(input[escapeIndex])
-                    index = escapeIndex + 1
-                }
-            }
-        }
-        return output.toString()
-    }
-
-    private companion object {
-        const val CursorPositionRequestSequence = "\u001B[6n"
-    }
-}
-
-class AlpineInteractiveSession internal constructor(
-    internal val handle: PtyHandle,
-) {
-    @Volatile
-    private var stopped = false
-    @Volatile
-    private var exited = false
-
-    val isAlive: Boolean
-        get() = !stopped && !exited
-
-    val isStopped: Boolean
-        get() = stopped
-
-    fun send(text: String) {
-        sendBytes(text.toByteArray(Charsets.UTF_8))
-    }
-
-    fun sendBytes(bytes: ByteArray) {
-        if (!isAlive) return
-        AetherPty.write(handle, bytes)
-    }
-
-    fun resize(rows: Int, columns: Int) {
-        if (!isAlive) return
-        AetherPty.resize(
-            handle = handle,
-            rows = rows.coerceAtLeast(1),
-            columns = columns.coerceAtLeast(1),
-        )
-    }
-
-    internal fun markExited() {
-        exited = true
-    }
-
-    fun stop() {
-        stopped = true
-        runCatching { AetherPty.close(handle) }
-    }
-}
+data class AlpineTerminalLaunchSpec(
+    val executable: String,
+    val arguments: Array<String>,
+    val environment: Array<String>,
+    val workingDirectory: String,
+)
