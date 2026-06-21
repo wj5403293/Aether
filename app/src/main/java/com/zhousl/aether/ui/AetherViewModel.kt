@@ -1,9 +1,6 @@
 package com.zhousl.aether.ui
 
 import android.app.Application
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.view.Surface
@@ -68,9 +65,9 @@ import com.zhousl.aether.data.resolveDefaultTitleModelKey
 import com.zhousl.aether.data.resolveAutomaticModelKey
 import com.zhousl.aether.data.resolveModelSettings
 import com.zhousl.aether.data.resolveStoredOrAutomaticModelKey
-import com.zhousl.aether.runtime.AlpineInteractiveSession
 import com.zhousl.aether.termux.TermuxSetupIssue
 import com.zhousl.aether.termux.TermuxSetupState
+import com.zhousl.aether.runtime.AlpineTerminalLaunchSpec
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -120,23 +117,12 @@ class AetherViewModel(
         diagnosticLogger = diagnosticLogger,
     )
     private val appUpdateManager = AppUpdateManager(application.applicationContext)
-    private val clipboardManager =
-        application.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     private var didEvaluateStartupUpdateCheck = false
     private var lastTrackedTermuxDetectedIssue: TermuxSetupIssue? = null
     private var pendingTermuxSetupSource: String? = null
     private val _uiState = MutableStateFlow(AetherUiState())
     private val _transientMessages = MutableSharedFlow<String>(extraBufferCapacity = 4)
     private var didEvaluateWorkspaceMode = false
-    private var alpineTerminalSession: AlpineInteractiveSession? = null
-    private val alpineTerminalScreenBuffer = AlpineTerminalScreenBuffer(
-        onResponse = { response ->
-            alpineTerminalSession?.send(response)
-        },
-        onClipboardText = { text ->
-            clipboardManager.setPrimaryClip(ClipData.newPlainText("Terminal selection", text))
-        },
-    )
 
     val uiState: StateFlow<AetherUiState> = _uiState.asStateFlow()
     val transientMessages = _transientMessages.asSharedFlow()
@@ -551,211 +537,10 @@ class AetherViewModel(
         }
     }
 
-    fun openAlpineTerminal() {
-        _uiState.update { current ->
-            current.copy(
-                alpineTerminal = current.alpineTerminal.copy(
-                    isOpen = true,
-                    error = "",
-                )
-            )
+    suspend fun createAlpineTerminalLaunchSpec(): Result<AlpineTerminalLaunchSpec> =
+        withContext(Dispatchers.IO) {
+            runCatching { runtime.alpineRuntime.createTerminalLaunchSpec() }
         }
-        ensureAlpineTerminalSession()
-    }
-
-    fun closeAlpineTerminal() {
-        alpineTerminalSession?.stop()
-        alpineTerminalSession = null
-        alpineTerminalScreenBuffer.clear()
-        _uiState.update { current ->
-            current.copy(
-                alpineTerminal = current.alpineTerminal.copy(
-                    isOpen = false,
-                    isStarting = false,
-                    isRunning = false,
-                    output = "",
-                    styledOutput = alpineTerminalScreenBuffer.styledText,
-                    bracketedPasteEnabled = alpineTerminalScreenBuffer.isBracketedPasteEnabled,
-                    mouseTrackingMode = alpineTerminalScreenBuffer.currentMouseTrackingMode,
-                    mouseProtocol = alpineTerminalScreenBuffer.currentMouseProtocol,
-                    alternateScreenEnabled = alpineTerminalScreenBuffer.isAlternateScreenEnabled,
-                    applicationCursorKeysEnabled = alpineTerminalScreenBuffer.isApplicationCursorKeysEnabled,
-                    applicationKeypadEnabled = alpineTerminalScreenBuffer.isApplicationKeypadEnabled,
-                    cursorRow = alpineTerminalScreenBuffer.cursorRow,
-                    cursorColumn = alpineTerminalScreenBuffer.cursorColumn,
-                    cursorVisible = alpineTerminalScreenBuffer.isCursorVisible,
-                    cursorStyle = alpineTerminalScreenBuffer.currentCursorStyle,
-                    focusEventsEnabled = alpineTerminalScreenBuffer.isFocusEventsEnabled,
-                    title = alpineTerminalScreenBuffer.currentTitle,
-                )
-            )
-        }
-    }
-
-    fun sendAlpineTerminalControl(sequence: String) {
-        ensureAlpineTerminalSession()
-        alpineTerminalSession?.send(sequence)
-    }
-
-    fun resizeAlpineTerminal(
-        rows: Int,
-        columns: Int,
-    ) {
-        val normalizedRows = rows.coerceAtLeast(1)
-        val normalizedColumns = columns.coerceAtLeast(1)
-        val current = _uiState.value.alpineTerminal
-        if (current.rows == normalizedRows && current.columns == normalizedColumns) return
-        _uiState.update { state ->
-            state.copy(
-                alpineTerminal = state.alpineTerminal.copy(
-                    rows = normalizedRows,
-                    columns = normalizedColumns,
-                )
-            )
-        }
-        alpineTerminalScreenBuffer.resize(normalizedRows, normalizedColumns)
-        alpineTerminalSession?.resize(normalizedRows, normalizedColumns)
-    }
-
-    fun clearAlpineTerminalOutput() {
-        alpineTerminalScreenBuffer.clear()
-        _uiState.update { current ->
-            current.copy(
-                alpineTerminal = current.alpineTerminal.copy(
-                    output = "",
-                    styledOutput = alpineTerminalScreenBuffer.styledText,
-                    bracketedPasteEnabled = alpineTerminalScreenBuffer.isBracketedPasteEnabled,
-                    mouseTrackingMode = alpineTerminalScreenBuffer.currentMouseTrackingMode,
-                    mouseProtocol = alpineTerminalScreenBuffer.currentMouseProtocol,
-                    alternateScreenEnabled = alpineTerminalScreenBuffer.isAlternateScreenEnabled,
-                    applicationCursorKeysEnabled = alpineTerminalScreenBuffer.isApplicationCursorKeysEnabled,
-                    applicationKeypadEnabled = alpineTerminalScreenBuffer.isApplicationKeypadEnabled,
-                    cursorRow = alpineTerminalScreenBuffer.cursorRow,
-                    cursorColumn = alpineTerminalScreenBuffer.cursorColumn,
-                    cursorVisible = alpineTerminalScreenBuffer.isCursorVisible,
-                    cursorStyle = alpineTerminalScreenBuffer.currentCursorStyle,
-                    focusEventsEnabled = alpineTerminalScreenBuffer.isFocusEventsEnabled,
-                    title = alpineTerminalScreenBuffer.currentTitle,
-                )
-            )
-        }
-    }
-
-    fun installAlpinePackageProfileInTerminal(profileId: String) {
-        openAlpineTerminal()
-        val command = runtime.alpineRuntime.packageProfileInstallCommand(profileId)
-        if (command == null) {
-            emitTransientMessage("Unknown Alpine package profile: $profileId")
-            return
-        }
-        viewModelScope.launch {
-            updateAlpinePackageProfileInstalling(profileId)
-            appendAlpineTerminalOutput("\n[Aether] Installing Alpine profile: $profileId\n$command\n")
-            val setupState = withContext(Dispatchers.IO) {
-                runtime.alpineRuntime.installPackageProfileWithOutput(profileId) { chunk ->
-                    appendAlpineTerminalOutput(chunk)
-                }
-            }
-            val profileState = if (setupState.isReady) {
-                PackageProfileState(
-                    profileId = profileId,
-                    installed = true,
-                    installedAtMillis = System.currentTimeMillis(),
-                    lastError = "",
-                )
-            } else {
-                PackageProfileState(
-                    profileId = profileId,
-                    installed = false,
-                    installedAtMillis = 0L,
-                    lastError = setupState.detail.ifBlank { "Install failed." },
-                )
-            }
-            val settings = _uiState.value.settings
-            settingsRepository.updateSettings(
-                settings.copy(
-                    alpinePackageProfiles = settings.alpinePackageProfiles + (profileId to profileState),
-                )
-            )
-            _uiState.update { current -> current.copy(alpineSetupState = setupState) }
-            appendAlpineTerminalOutput(
-                if (setupState.isReady) {
-                    "\n[Aether] Alpine profile '$profileId' is ready.\n"
-                } else {
-                    "\n[Aether] Alpine profile '$profileId' failed: ${setupState.detail}\n"
-                }
-            )
-            emitTransientMessage(setupState.detail.ifBlank { "Alpine package profile updated." })
-        }
-    }
-
-    private fun ensureAlpineTerminalSession() {
-        val currentSession = alpineTerminalSession
-        if (currentSession?.isAlive == true || _uiState.value.alpineTerminal.isStarting) return
-        _uiState.update { current ->
-            current.copy(
-                alpineTerminal = current.alpineTerminal.copy(
-                    isStarting = true,
-                    isRunning = false,
-                    error = "",
-                )
-            )
-        }
-        viewModelScope.launch {
-            runCatching {
-                withContext(Dispatchers.IO) {
-                    runtime.alpineRuntime.startInteractiveSession { chunk ->
-                        appendAlpineTerminalOutput(chunk)
-                    }
-                }
-            }.onSuccess { session ->
-                alpineTerminalSession = session
-                _uiState.update { current ->
-                    current.copy(
-                        alpineTerminal = current.alpineTerminal.copy(
-                            isStarting = false,
-                            isRunning = true,
-                            error = "",
-                        )
-                    )
-                }
-            }.onFailure { throwable ->
-                alpineTerminalSession = null
-                _uiState.update { current ->
-                    current.copy(
-                        alpineTerminal = current.alpineTerminal.copy(
-                            isStarting = false,
-                            isRunning = false,
-                            error = throwable.message ?: "Failed to start Alpine terminal.",
-                        )
-                    )
-                }
-            }
-        }
-    }
-
-    private fun appendAlpineTerminalOutput(chunk: String) {
-        _uiState.update { current ->
-            current.copy(
-                alpineTerminal = current.alpineTerminal.copy(
-                    output = alpineTerminalScreenBuffer.append(chunk).takeLast(80_000),
-                    styledOutput = alpineTerminalScreenBuffer.styledText.takeLast(80_000),
-                    bracketedPasteEnabled = alpineTerminalScreenBuffer.isBracketedPasteEnabled,
-                    mouseTrackingMode = alpineTerminalScreenBuffer.currentMouseTrackingMode,
-                    mouseProtocol = alpineTerminalScreenBuffer.currentMouseProtocol,
-                    alternateScreenEnabled = alpineTerminalScreenBuffer.isAlternateScreenEnabled,
-                    applicationCursorKeysEnabled = alpineTerminalScreenBuffer.isApplicationCursorKeysEnabled,
-                    applicationKeypadEnabled = alpineTerminalScreenBuffer.isApplicationKeypadEnabled,
-                    cursorRow = alpineTerminalScreenBuffer.cursorRow,
-                    cursorColumn = alpineTerminalScreenBuffer.cursorColumn,
-                    cursorVisible = alpineTerminalScreenBuffer.isCursorVisible,
-                    cursorStyle = alpineTerminalScreenBuffer.currentCursorStyle,
-                    focusEventsEnabled = alpineTerminalScreenBuffer.isFocusEventsEnabled,
-                    title = alpineTerminalScreenBuffer.currentTitle,
-                )
-            )
-        }
-    }
 
     private suspend fun updateAlpinePackageProfileInstalling(profileId: String) {
         val installingSettings = _uiState.value.settings.copy(

@@ -184,47 +184,6 @@ data class AppUpdateUiState(
     val pendingInstallUri: String = "",
 )
 
-data class AlpineTerminalUiState(
-    val isOpen: Boolean = false,
-    val isStarting: Boolean = false,
-    val isRunning: Boolean = false,
-    val output: String = "",
-    val styledOutput: TerminalStyledText = TerminalStyledText(),
-    val error: String = "",
-    val rows: Int = 32,
-    val columns: Int = 96,
-    val bracketedPasteEnabled: Boolean = false,
-    val mouseTrackingMode: TerminalMouseTrackingMode = TerminalMouseTrackingMode.None,
-    val mouseProtocol: TerminalMouseProtocol = TerminalMouseProtocol.Normal,
-    val alternateScreenEnabled: Boolean = false,
-    val applicationCursorKeysEnabled: Boolean = false,
-    val applicationKeypadEnabled: Boolean = false,
-    val cursorRow: Int = 0,
-    val cursorColumn: Int = 0,
-    val cursorVisible: Boolean = true,
-    val cursorStyle: TerminalCursorStyle = TerminalCursorStyle.Bar,
-    val focusEventsEnabled: Boolean = false,
-    val title: String = "",
-)
-
-enum class TerminalMouseTrackingMode {
-    None,
-    Click,
-    Drag,
-    Any,
-}
-
-enum class TerminalMouseProtocol {
-    Normal,
-    Sgr,
-}
-
-enum class TerminalCursorStyle {
-    Block,
-    Underline,
-    Bar,
-}
-
 data class AetherUiState(
     val currentScreen: AppScreen = AppScreen.Chat,
     val isStartupRouteResolved: Boolean = false,
@@ -271,5 +230,4 @@ data class AetherUiState(
     val agentModeDisplayState: AgentModeDisplayState = AgentModeDisplayState(),
     val agentModeAuthorizationState: AgentModeAuthorizationState = AgentModeAuthorizationState(),
     val appUpdate: AppUpdateUiState = AppUpdateUiState(),
-    val alpineTerminal: AlpineTerminalUiState = AlpineTerminalUiState(),
 )
