@@ -696,6 +696,10 @@ private fun AetherAppContent(
                     keepTasksRunningInBackground = uiState.settings.keepTasksRunningInBackground,
                     notifyOnTaskCompletion = uiState.settings.notifyOnTaskCompletion,
                     agentWorkspaceMode = uiState.settings.agentWorkspaceMode,
+                    autoCleanOldCommandHistory =
+                        uiState.settings.autoCleanOldCommandHistory,
+                    oldCommandHistoryRetentionHours =
+                        uiState.settings.oldCommandHistoryRetentionHours,
                     termuxLiveOutputEnabled = uiState.settings.termuxLiveOutputEnabled,
                     termuxEnvironmentVariables = uiState.settings.termuxEnvironmentVariables,
                     agentModeAuthorizationEnabled = uiState.settings.agentModeAuthorizationEnabled,

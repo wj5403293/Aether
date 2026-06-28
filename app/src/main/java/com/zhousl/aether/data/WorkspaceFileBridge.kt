@@ -98,6 +98,143 @@ class WorkspaceFileBridge(
         parseStructuredStdout(raw.optString("stdout"))["legacy"] == "true"
     }
 
+    suspend fun deleteSessionRuntimeData(
+        sessionId: String,
+        sharedWorkspaceFilePaths: Collection<String> = emptyList(),
+    ): Result<Unit> = deleteSessionsRuntimeData(
+        sessionIds = listOf(sessionId),
+        sharedWorkspaceFilePaths = sharedWorkspaceFilePaths,
+    )
+
+    private suspend fun deletePathUnderRoot(
+        path: String,
+        rootPath: String,
+        targetLabel: String,
+        skipUnsafePath: Boolean = false,
+        requireFile: Boolean = false,
+    ): Result<Unit> = runCatching {
+        val command = buildString {
+            appendCommonShellPreamble(this)
+            appendSafePathUnderRoot(
+                builder = this,
+                variableName = "delete_path",
+                path = path,
+                rootPath = rootPath,
+                skipUnsafePath = skipUnsafePath,
+            )
+            if (requireFile) {
+                appendLine("if [ -d \"\$delete_path\" ]; then")
+                appendLine("  emit_kv error 'refusing_directory_delete'")
+                appendLine("  exit 1")
+                appendLine("fi")
+                appendLine("if [ -e \"\$delete_path\" ] && [ ! -f \"\$delete_path\" ]; then")
+                appendLine("  emit_kv error 'refusing_non_file_delete'")
+                appendLine("  exit 1")
+                appendLine("fi")
+            }
+            appendLine("path_deleted=false")
+            appendLine("if [ -e \"\$delete_path\" ]; then")
+            appendLine("  rm -rf -- \"\$delete_path\"")
+            appendLine("  path_deleted=true")
+            appendLine("fi")
+            appendLine("emit_kv path_deleted \"\$path_deleted\"")
+        }
+        val raw = JSONObject(bashTool.executeCommand(command, awaitTimeoutMillis = 60_000L))
+        if (!raw.optBoolean("ok")) {
+            error(raw.optString("errmsg").ifBlank { raw.optString("stderr").ifBlank { "Couldn't delete $targetLabel." } })
+        }
+    }
+
+    private suspend fun deleteSessionWorkspace(sessionId: String): Result<Unit> = deletePathUnderRoot(
+        path = sessionWorkspaceDirectory(sessionId),
+        rootPath = perSessionWorkspacesRootDirectory(),
+        targetLabel = "session workspace",
+    )
+
+    private suspend fun deleteSharedWorkspaceFile(path: String): Result<Unit> = deletePathUnderRoot(
+        path = path,
+        rootPath = sharedWorkspaceUploadsDirectory(),
+        targetLabel = "shared workspace file",
+        skipUnsafePath = true,
+        requireFile = true,
+    )
+
+    suspend fun deleteSessionsRuntimeData(
+        sessionIds: Collection<String>,
+        sharedWorkspaceFilePaths: Collection<String> = emptyList(),
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val failures = mutableListOf<String>()
+            val uniqueSessionIds = sessionIds
+                .map(String::trim)
+                .filter(String::isNotEmpty)
+                .distinct()
+            val uniqueSharedWorkspaceFilePaths = sharedWorkspaceFilePaths
+                .map(String::trim)
+                .filter(String::isNotEmpty)
+                .distinct()
+
+            uniqueSessionIds.forEach { sessionId ->
+                deleteSessionWorkspace(sessionId = sessionId).onFailure { error ->
+                    failures += "workspace $sessionId: ${error.message.orEmpty()}"
+                }
+            }
+            uniqueSharedWorkspaceFilePaths.forEach { path ->
+                deleteSharedWorkspaceFile(path = path).onFailure { error ->
+                    failures += "shared file $path: ${error.message.orEmpty()}"
+                }
+            }
+            if (failures.isNotEmpty()) {
+                error(
+                    "Failed to clean up ${failures.size} runtime item(s): " +
+                        failures.joinToString(" | ")
+                )
+            }
+        }
+    }
+
+    private fun sessionWorkspaceDirectory(sessionId: String): String = workspaceDirectory(
+        sessionId = sessionId,
+        mode = AgentWorkspaceMode.PerSession,
+    )
+
+    private fun perSessionWorkspacesRootDirectory(): String =
+        "${TermuxContract.HomeDirectory}/$PerSessionWorkspaceBaseDirectoryName"
+
+    private fun sharedWorkspaceUploadsDirectory(): String =
+        "${TermuxContract.HomeDirectory}/$SharedWorkspaceBaseDirectoryName/uploads"
+
+    private fun appendSafePathUnderRoot(
+        builder: StringBuilder,
+        variableName: String,
+        path: String,
+        rootPath: String,
+        skipUnsafePath: Boolean = false,
+    ) {
+        builder.appendLine("$variableName=\"\$(decode_b64 '${encodeBase64(path)}')\"")
+        builder.appendLine("delete_root=\"\$(decode_b64 '${encodeBase64(rootPath)}')\"")
+        builder.appendLine("${variableName}_real=\"\$(realpath -m \"\$$variableName\")\"")
+        builder.appendLine("delete_root_real=\"\$(realpath -m \"\$delete_root\")\"")
+        builder.appendLine("if [ \"\$${variableName}_real\" = \"\$delete_root_real\" ]; then")
+        if (skipUnsafePath) {
+            builder.appendLine("  emit_kv path_skipped true")
+            builder.appendLine("  exit 0")
+        } else {
+            builder.appendLine("  emit_kv error 'refusing_delete_root_delete'")
+            builder.appendLine("  exit 1")
+        }
+        builder.appendLine("fi")
+        builder.appendLine("case \"\$${variableName}_real\" in")
+        builder.appendLine("  \"\$delete_root_real\"/*) ;;")
+        if (skipUnsafePath) {
+            builder.appendLine("  *) emit_kv path_skipped true; exit 0 ;;")
+        } else {
+            builder.appendLine("  *) emit_kv error 'refusing_unsafe_delete_path'; exit 1 ;;")
+        }
+        builder.appendLine("esac")
+        builder.appendLine("$variableName=\"\$${variableName}_real\"")
+    }
+
     suspend fun readWorkspaceFile(
         path: String,
         workingDirectory: String = TermuxContract.HomeDirectory,

@@ -39,6 +39,11 @@ class SettingsRepository(
             } else {
                 defaults.agentWorkspaceMode
             },
+            autoCleanOldCommandHistory =
+                preferences[AUTO_CLEAN_OLD_COMMAND_HISTORY] ?: true,
+            oldCommandHistoryRetentionHours = normalizeOldCommandHistoryRetentionHours(
+                preferences[OLD_COMMAND_HISTORY_RETENTION_HOURS],
+            ),
             termuxSetupCompleted = preferences[TERMUX_SETUP_COMPLETED] ?: false,
             termuxSetupNoticeDismissed = preferences[TERMUX_SETUP_NOTICE_DISMISSED] ?: false,
             termuxLiveOutputEnabled = preferences[TERMUX_LIVE_OUTPUT_ENABLED] ?: true,
@@ -181,6 +186,9 @@ class SettingsRepository(
             it[NOTIFY_ON_TASK_COMPLETION] = settings.notifyOnTaskCompletion
             it[AGENT_WORKSPACE_MODE] = settings.agentWorkspaceMode.storageValue
             it[WORKSPACE_MODE_INITIALIZED] = true
+            it[AUTO_CLEAN_OLD_COMMAND_HISTORY] = settings.autoCleanOldCommandHistory
+            it[OLD_COMMAND_HISTORY_RETENTION_HOURS] =
+                normalizeOldCommandHistoryRetentionHours(settings.oldCommandHistoryRetentionHours)
             it[TERMUX_SETUP_COMPLETED] = settings.termuxSetupCompleted
             it[TERMUX_SETUP_NOTICE_DISMISSED] = settings.termuxSetupNoticeDismissed
             it[TERMUX_LIVE_OUTPUT_ENABLED] = settings.termuxLiveOutputEnabled
@@ -262,6 +270,9 @@ class SettingsRepository(
             it[NOTIFY_ON_TASK_COMPLETION] = settings.notifyOnTaskCompletion
             it[AGENT_WORKSPACE_MODE] = settings.agentWorkspaceMode.storageValue
             it[WORKSPACE_MODE_INITIALIZED] = true
+            it[AUTO_CLEAN_OLD_COMMAND_HISTORY] = settings.autoCleanOldCommandHistory
+            it[OLD_COMMAND_HISTORY_RETENTION_HOURS] =
+                normalizeOldCommandHistoryRetentionHours(settings.oldCommandHistoryRetentionHours)
             it[TERMUX_SETUP_COMPLETED] = settings.termuxSetupCompleted
             it[TERMUX_SETUP_NOTICE_DISMISSED] = settings.termuxSetupNoticeDismissed
             it[TERMUX_LIVE_OUTPUT_ENABLED] = settings.termuxLiveOutputEnabled
@@ -351,6 +362,10 @@ class SettingsRepository(
         val AGENT_WORKSPACE_MODE = stringPreferencesKey("agent_workspace_mode")
         val WORKSPACE_MODE_INITIALIZED =
             booleanPreferencesKey("workspace_mode_initialized")
+        val AUTO_CLEAN_OLD_COMMAND_HISTORY =
+            booleanPreferencesKey("auto_clean_old_command_history")
+        val OLD_COMMAND_HISTORY_RETENTION_HOURS =
+            intPreferencesKey("old_command_history_retention_hours")
         val TERMUX_SETUP_COMPLETED =
             booleanPreferencesKey("termux_setup_completed")
         val TERMUX_SETUP_NOTICE_DISMISSED =

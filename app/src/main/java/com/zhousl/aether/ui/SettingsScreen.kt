@@ -74,6 +74,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SegmentedButton
@@ -97,6 +98,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
@@ -113,7 +115,6 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
@@ -157,6 +158,7 @@ import com.zhousl.aether.data.availableModels
 import com.zhousl.aether.data.enabledModels
 import com.zhousl.aether.data.findModelOption
 import com.zhousl.aether.data.normalizeLlmInactivityReconnectTimeoutSeconds
+import com.zhousl.aether.data.normalizeOldCommandHistoryRetentionHours
 import com.zhousl.aether.data.normalizeTavilyBaseUrl
 import com.zhousl.aether.data.quickActionLabel
 import com.zhousl.aether.data.resolveAutomaticModelKey
@@ -388,6 +390,8 @@ fun SettingsScreen(
     keepTasksRunningInBackground: Boolean,
     notifyOnTaskCompletion: Boolean,
     agentWorkspaceMode: AgentWorkspaceMode,
+    autoCleanOldCommandHistory: Boolean,
+    oldCommandHistoryRetentionHours: Int,
     termuxLiveOutputEnabled: Boolean,
     termuxEnvironmentVariables: List<TermuxEnvironmentVariable>,
     agentModeAuthorizationEnabled: Boolean,
@@ -427,6 +431,8 @@ fun SettingsScreen(
         Boolean,
         Boolean,
         AgentWorkspaceMode,
+        Boolean,
+        Int,
         Boolean,
         List<TermuxEnvironmentVariable>,
         Boolean,
@@ -515,6 +521,12 @@ fun SettingsScreen(
     var agentWorkspaceModeValue by rememberSaveable {
         mutableStateOf(agentWorkspaceMode)
     }
+    var autoCleanOldCommandHistoryValue by rememberSaveable {
+        mutableStateOf(autoCleanOldCommandHistory)
+    }
+    var oldCommandHistoryRetentionHoursValue by rememberSaveable(stateSaver = TextFieldValue.Saver) {
+        mutableStateOf(TextFieldValue(oldCommandHistoryRetentionHours.toString()))
+    }
     var termuxLiveOutputEnabledValue by rememberSaveable {
         mutableStateOf(termuxLiveOutputEnabled)
     }
@@ -532,6 +544,13 @@ fun SettingsScreen(
     }
     var themeModeValue by rememberSaveable {
         mutableStateOf(themeMode)
+    }
+    LaunchedEffect(
+        autoCleanOldCommandHistory,
+        oldCommandHistoryRetentionHours,
+    ) {
+        autoCleanOldCommandHistoryValue = autoCleanOldCommandHistory
+        oldCommandHistoryRetentionHoursValue = TextFieldValue(oldCommandHistoryRetentionHours.toString())
     }
     LaunchedEffect(language) {
         languageValue = language
@@ -576,6 +595,10 @@ fun SettingsScreen(
             keepTasksRunningInBackgroundValue,
             notifyOnTaskCompletionValue,
             agentWorkspaceModeValue,
+            autoCleanOldCommandHistoryValue,
+            normalizeOldCommandHistoryRetentionHours(
+                oldCommandHistoryRetentionHoursValue.text.trim().toIntOrNull()
+            ),
             termuxLiveOutputEnabledValue,
             termuxEnvironmentVariablesValue,
             agentModeAuthorizationEnabledValue,
@@ -606,6 +629,10 @@ fun SettingsScreen(
             keepTasksRunningInBackgroundValue,
             notifyOnTaskCompletionValue,
             agentWorkspaceModeValue,
+            autoCleanOldCommandHistoryValue,
+            normalizeOldCommandHistoryRetentionHours(
+                oldCommandHistoryRetentionHoursValue.text.trim().toIntOrNull()
+            ),
             termuxLiveOutputEnabledValue,
             termuxEnvironmentVariablesValue,
             agentModeAuthorizationEnabledValue,
@@ -636,6 +663,10 @@ fun SettingsScreen(
             keepTasksRunningInBackgroundValue,
             notifyOnTaskCompletionValue,
             agentWorkspaceModeValue,
+            autoCleanOldCommandHistoryValue,
+            normalizeOldCommandHistoryRetentionHours(
+                oldCommandHistoryRetentionHoursValue.text.trim().toIntOrNull()
+            ),
             termuxLiveOutputEnabledValue,
             termuxEnvironmentVariablesValue,
             agentModeAuthorizationEnabledValue,
@@ -1133,6 +1164,10 @@ fun SettingsScreen(
                 onExportAppData = onExportAppData,
                 onExportLogs = onExportLogs,
                 onForceUpdateCheckForTesting = onForceUpdateCheckForTesting,
+                autoCleanOldCommandHistory = autoCleanOldCommandHistoryValue,
+                oldCommandHistoryRetentionHours = oldCommandHistoryRetentionHoursValue,
+                onAutoCleanOldCommandHistoryChanged = { autoCleanOldCommandHistoryValue = it },
+                onOldCommandHistoryRetentionHoursChanged = { oldCommandHistoryRetentionHoursValue = it },
                 termuxReadyForTesting = developerTermuxReadyOverride ?: termuxSetupState.isReady,
                 onTermuxReadyForTestingChanged = onSetDeveloperTermuxReadyOverride,
                 onBack = { currentPage = SettingsPage.Hub.name },
@@ -3983,6 +4018,45 @@ private fun TermuxSettingsPage(
 }
 
 @Composable
+private fun RuntimeCleanupDeveloperSettingsSection(
+    autoCleanOldCommandHistory: Boolean,
+    oldCommandHistoryRetentionHours: TextFieldValue,
+    onAutoCleanOldCommandHistoryChanged: (Boolean) -> Unit,
+    onOldCommandHistoryRetentionHoursChanged: (TextFieldValue) -> Unit,
+) {
+    SettingsCardGroup {
+        Column(modifier = Modifier.padding(16.dp)) {
+            SettingsToggleRow(
+                title = stringResource(R.string.settings_old_command_history_retention_hours),
+                subtitle = stringResource(R.string.settings_old_command_history_retention_hours_description),
+                checked = autoCleanOldCommandHistory,
+                onCheckedChange = onAutoCleanOldCommandHistoryChanged,
+            )
+            AnimatedVisibility(visible = autoCleanOldCommandHistory) {
+                Column {
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = oldCommandHistoryRetentionHours,
+                        onValueChange = { value ->
+                            onOldCommandHistoryRetentionHoursChanged(
+                                value.copy(text = value.text.filter(Char::isDigit)),
+                            )
+                        },
+                        label = { Text(stringResource(R.string.settings_old_command_history_retention_hours_value)) },
+                        supportingText = {
+                            Text(stringResource(R.string.settings_old_command_history_retention_hours_value_description))
+                        },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun TermuxLiveOutputSettingsSection(
     liveOutputEnabled: Boolean,
     onLiveOutputEnabledChanged: (Boolean) -> Unit,
@@ -5060,6 +5134,10 @@ private fun DeveloperSettingsPage(
     onExportAppData: () -> Unit,
     onExportLogs: () -> Unit,
     onForceUpdateCheckForTesting: () -> Unit,
+    autoCleanOldCommandHistory: Boolean,
+    oldCommandHistoryRetentionHours: TextFieldValue,
+    onAutoCleanOldCommandHistoryChanged: (Boolean) -> Unit,
+    onOldCommandHistoryRetentionHoursChanged: (TextFieldValue) -> Unit,
     termuxReadyForTesting: Boolean,
     onTermuxReadyForTestingChanged: (Boolean) -> Unit,
     onBack: () -> Unit,
@@ -5149,6 +5227,15 @@ private fun DeveloperSettingsPage(
                 )
             }
         }
+
+        Spacer(Modifier.height(14.dp))
+
+        RuntimeCleanupDeveloperSettingsSection(
+            autoCleanOldCommandHistory = autoCleanOldCommandHistory,
+            oldCommandHistoryRetentionHours = oldCommandHistoryRetentionHours,
+            onAutoCleanOldCommandHistoryChanged = onAutoCleanOldCommandHistoryChanged,
+            onOldCommandHistoryRetentionHoursChanged = onOldCommandHistoryRetentionHoursChanged,
+        )
 
         Spacer(Modifier.height(14.dp))
 
