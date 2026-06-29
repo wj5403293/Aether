@@ -32,6 +32,7 @@ import com.zhousl.aether.data.McpServerConfig
 import com.zhousl.aether.data.McpServerTestOperation
 import com.zhousl.aether.data.normalizeSelectableModelKey
 import com.zhousl.aether.data.normalizeLlmInactivityReconnectTimeoutSeconds
+import com.zhousl.aether.data.normalizeOldCommandHistoryRetentionHours
 import com.zhousl.aether.data.normalizeTavilyBaseUrl
 import com.zhousl.aether.data.OnboardingStarterPrompt
 import com.zhousl.aether.data.OpenAiCompatibleClient
@@ -160,6 +161,10 @@ class AetherViewModel(
                 }
                 syncTermuxSettings()
                 bashTool.setEnvironmentVariables(settings.termuxEnvironmentVariables)
+                bashTool.setManagedBashRunCleanupPolicy(
+                    enabled = settings.autoCleanOldCommandHistory,
+                    retentionHours = settings.oldCommandHistoryRetentionHours,
+                )
                 runtime.alpineRuntime.setEnvironmentVariables(settings.alpineEnvironmentVariables)
                 if (!didEvaluateStartupUpdateCheck && settings.privacyPolicyAccepted) {
                     didEvaluateStartupUpdateCheck = true
@@ -1087,7 +1092,10 @@ class AetherViewModel(
         }
 
         var didUpdate = false
+        var sharedWorkspaceFilePaths = emptyList<String>()
         _uiState.update { current ->
+            val session = current.sessions.firstOrNull { it.id == sessionId } ?: return@update current
+            sharedWorkspaceFilePaths = session.workspaceFilePathsForCleanup()
             val updatedSessions = current.sessions.filterNot { it.id == sessionId }
             if (updatedSessions.size == current.sessions.size) return@update current
             didUpdate = true
@@ -1104,7 +1112,10 @@ class AetherViewModel(
             )
         }
         if (didUpdate) {
-            persistDeleteSession(sessionId)
+            persistDeleteSession(
+                sessionId = sessionId,
+                sharedWorkspaceFilePaths = sharedWorkspaceFilePaths,
+            )
             captureAnalyticsEvent(event = "conversation deleted")
         }
     }
@@ -1282,6 +1293,7 @@ class AetherViewModel(
         var didUpdate = false
         var updatedSessionForPersistence: ChatSession? = null
         var removedSessionForPersistence = false
+        var sharedWorkspaceFilePaths = emptyList<String>()
 
         _uiState.update { current ->
             val sessionIndex = current.sessions.indexOfFirst { it.id == sessionId }
@@ -1296,11 +1308,14 @@ class AetherViewModel(
             val updatedSessions = current.sessions.toMutableList().apply {
                 removeAt(sessionIndex)
                 if (trimmedMessages.isNotEmpty()) {
+                    val removedMessages = session.messages.drop(trimFromIndex)
                     val updatedSession = session.withMessages(trimmedMessages)
                     updatedSessionForPersistence = updatedSession
+                    sharedWorkspaceFilePaths = session.copy(messages = removedMessages).workspaceFilePathsForCleanup()
                     add(sessionIndex.coerceAtMost(size), updatedSession)
                 } else {
                     removedSessionForPersistence = true
+                    sharedWorkspaceFilePaths = session.workspaceFilePathsForCleanup()
                 }
             }
 
@@ -1345,8 +1360,15 @@ class AetherViewModel(
 
         if (didUpdate) {
             if (removedSessionForPersistence) {
-                persistDeleteSession(sessionId)
+                persistDeleteSession(
+                    sessionId = sessionId,
+                    sharedWorkspaceFilePaths = sharedWorkspaceFilePaths,
+                )
             } else {
+                cleanupSharedWorkspaceFilesIfUnreferenced(
+                    sharedWorkspaceFilePaths = sharedWorkspaceFilePaths,
+                    excludedSessionIds = emptySet(),
+                )
                 updatedSessionForPersistence?.let(::persistSessionSnapshot)
             }
         }
@@ -1542,6 +1564,8 @@ class AetherViewModel(
         keepTasksRunningInBackground: Boolean,
         notifyOnTaskCompletion: Boolean,
         agentWorkspaceMode: AgentWorkspaceMode,
+        autoCleanOldCommandHistory: Boolean,
+        oldCommandHistoryRetentionHours: Int,
         termuxLiveOutputEnabled: Boolean,
         termuxEnvironmentVariables: List<TermuxEnvironmentVariable>,
         agentModeAuthorizationEnabled: Boolean,
@@ -1590,6 +1614,10 @@ class AetherViewModel(
                     keepTasksRunningInBackground = keepTasksRunningInBackground,
                     notifyOnTaskCompletion = notifyOnTaskCompletion,
                     agentWorkspaceMode = agentWorkspaceMode,
+                    autoCleanOldCommandHistory = autoCleanOldCommandHistory,
+                    oldCommandHistoryRetentionHours = normalizeOldCommandHistoryRetentionHours(
+                        oldCommandHistoryRetentionHours
+                    ),
                     termuxLiveOutputEnabled = termuxLiveOutputEnabled,
                     termuxEnvironmentVariables = normalizeTermuxEnvironmentVariables(termuxEnvironmentVariables),
                     agentModeAuthorizationEnabled = agentModeAuthorizationEnabled,
@@ -2659,8 +2687,31 @@ class AetherViewModel(
         }
     }
 
-    private fun persistDeleteSession(sessionId: String) {
+    private fun ChatSession.workspaceFilePathsForCleanup(): List<String> =
+        messages.collectWorkspaceFilePathsForCleanup().distinct()
+
+    private fun List<ChatMessage>.collectWorkspaceFilePathsForCleanup(): List<String> =
+        flatMap { message -> message.collectWorkspaceFilePathsForCleanup() }
+
+    private fun ChatMessage.collectWorkspaceFilePathsForCleanup(): List<String> =
+        attachments
+            .map { attachment -> attachment.workspacePath.trim() }
+            .filter(String::isNotEmpty) +
+            branchGroup
+                ?.branches
+                .orEmpty()
+                .flatMap { branch -> branch.collectWorkspaceFilePathsForCleanup() }
+
+    private fun persistDeleteSession(
+        sessionId: String,
+        sharedWorkspaceFilePaths: Collection<String> = emptyList(),
+    ) {
+        var unreferencedSharedWorkspaceFilePaths = emptyList<String>()
         chatStateStore.update { persisted ->
+            unreferencedSharedWorkspaceFilePaths = sharedWorkspaceFilePaths.unreferencedWorkspaceFilePaths(
+                sessions = persisted.sessions,
+                excludedSessionIds = setOf(sessionId),
+            )
             val updatedSessions = persisted.sessions.filterNot { it.id == sessionId }
             persisted.copy(
                 sessions = updatedSessions,
@@ -2670,6 +2721,89 @@ class AetherViewModel(
                     persisted.currentSessionId
                 },
             )
+        }
+        scheduleSessionRuntimeDataCleanup(
+            sessionIds = listOf(sessionId),
+            sharedWorkspaceFilePaths = unreferencedSharedWorkspaceFilePaths,
+            mode = _uiState.value.settings.agentWorkspaceMode,
+        )
+    }
+
+    private fun cleanupSharedWorkspaceFilesIfUnreferenced(
+        sharedWorkspaceFilePaths: Collection<String>,
+        excludedSessionIds: Set<String>,
+    ) {
+        val unreferencedSharedWorkspaceFilePaths = sharedWorkspaceFilePaths.unreferencedWorkspaceFilePaths(
+            sessions = _uiState.value.sessions,
+            excludedSessionIds = excludedSessionIds,
+        )
+        if (unreferencedSharedWorkspaceFilePaths.isEmpty()) return
+        scheduleSessionRuntimeDataCleanup(
+            sessionIds = emptyList(),
+            sharedWorkspaceFilePaths = unreferencedSharedWorkspaceFilePaths,
+            mode = _uiState.value.settings.agentWorkspaceMode,
+        )
+    }
+
+    private fun Collection<String>.unreferencedWorkspaceFilePaths(
+        sessions: Collection<ChatSession>,
+        excludedSessionIds: Set<String>,
+    ): List<String> {
+        val candidatePaths = map(String::trim)
+            .filter(String::isNotEmpty)
+            .distinct()
+        if (candidatePaths.isEmpty()) return emptyList()
+
+        val referencedPaths = sessions
+            .asSequence()
+            .filterNot { session -> session.id in excludedSessionIds }
+            .flatMap { session -> session.workspaceFilePathsForCleanup().asSequence() }
+            .toSet()
+        return candidatePaths.filterNot(referencedPaths::contains)
+    }
+
+    private fun scheduleSessionRuntimeDataCleanup(
+        sessionIds: Collection<String>,
+        sharedWorkspaceFilePaths: Collection<String>,
+        mode: AgentWorkspaceMode,
+    ) {
+        val cleanupSessionIds = sessionIds
+            .filter { it.isNotBlank() && it != DraftSessionId }
+            .distinct()
+        val sharedWorkspaceFileCount = sharedWorkspaceFilePaths.distinct().size
+        if (cleanupSessionIds.isEmpty() && sharedWorkspaceFileCount == 0) return
+
+        viewModelScope.launch {
+            workspaceFileBridge.deleteSessionsRuntimeData(
+                sessionIds = cleanupSessionIds,
+                sharedWorkspaceFilePaths = sharedWorkspaceFilePaths,
+            )
+                .onSuccess {
+                    diagnosticLogger.event(
+                        category = "storage",
+                        event = "deleted_session_runtime_cleanup_completed",
+                        sessionId = cleanupSessionIds.singleOrNull(),
+                        details = mapOf(
+                            "session_count" to cleanupSessionIds.size,
+                            "shared_workspace_file_count" to sharedWorkspaceFileCount,
+                            "settings_workspace_mode" to mode.storageValue,
+                        ),
+                    )
+                }
+                .onFailure { throwable ->
+                    diagnosticLogger.exception(
+                        category = "storage",
+                        event = "deleted_session_runtime_cleanup_failed",
+                        throwable = throwable,
+                        level = "warn",
+                        sessionId = cleanupSessionIds.singleOrNull(),
+                        details = mapOf(
+                            "session_count" to cleanupSessionIds.size,
+                            "shared_workspace_file_count" to sharedWorkspaceFileCount,
+                            "settings_workspace_mode" to mode.storageValue,
+                        ),
+                    )
+                }
         }
     }
 
@@ -4098,6 +4232,8 @@ class AetherViewModel(
                 }
             },
         )
+        put("autoCleanOldCommandHistory", autoCleanOldCommandHistory)
+        put("oldCommandHistoryRetentionHours", oldCommandHistoryRetentionHours)
         put("agentModeAuthorizationEnabled", agentModeAuthorizationEnabled)
         put("agentModeAuthorizationMethod", agentModeAuthorizationMethod.storageValue)
         put("language", language.storageValue)
@@ -4161,6 +4297,16 @@ class AetherViewModel(
             termuxLiveOutputEnabled = json.optBoolean(
                 "termuxLiveOutputEnabled",
                 defaults.termuxLiveOutputEnabled,
+            ),
+            autoCleanOldCommandHistory = json.optBoolean(
+                "autoCleanOldCommandHistory",
+                defaults.autoCleanOldCommandHistory,
+            ),
+            oldCommandHistoryRetentionHours = normalizeOldCommandHistoryRetentionHours(
+                json.optInt(
+                    "oldCommandHistoryRetentionHours",
+                    defaults.oldCommandHistoryRetentionHours,
+                )
             ),
             enabledRuntimeIds = parseImportedRuntimeIds(json.optJSONArray("enabledRuntimeIds")),
             defaultRuntimeId = LocalRuntimeId.fromStorage(json.optString("defaultRuntimeId")),

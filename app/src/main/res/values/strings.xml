@@ -781,4 +781,8 @@
     <string name="onboarding_alpine_status_missing_assets">This build does not include the Alpine runtime assets yet.</string>
     <string name="onboarding_alpine_status_failed">Alpine could not start. You can retry later from Settings.</string>
     <string name="onboarding_alpine_status_not_ready">Alpine is not ready yet.</string>
+    <string name="settings_old_command_history_retention_hours">Clean up old command output</string>
+    <string name="settings_old_command_history_retention_hours_description">Expired completed output is cleaned up when starting new bash commands. Running commands are unaffected.</string>
+    <string name="settings_old_command_history_retention_hours_value">Keep output for</string>
+    <string name="settings_old_command_history_retention_hours_value_description">Default: 6 hours. Range: 1–168.</string>
 </resources>

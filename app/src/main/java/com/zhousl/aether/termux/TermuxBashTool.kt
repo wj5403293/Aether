@@ -9,10 +9,14 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import com.zhousl.aether.BuildConfig
 import com.zhousl.aether.data.AetherDiagnosticLogger
+import com.zhousl.aether.data.DefaultOldCommandHistoryRetentionHours
+import com.zhousl.aether.data.MaxOldCommandHistoryRetentionHours
+import com.zhousl.aether.data.MinOldCommandHistoryRetentionHours
 import com.zhousl.aether.data.TermuxEnvironmentVariable
 import com.zhousl.aether.data.normalizeTermuxEnvironmentVariables
 import java.util.Base64
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -32,6 +36,7 @@ private const val TermuxLogTag = "AetherTermux"
 private val EnableTermuxLogging: Boolean
     get() = BuildConfig.DEBUG
 private const val EarlyManagedLaunchGraceMillis = 5_000L
+private const val ManagedBashRunPruneThrottleMillis = 60 * 60 * 1000L
 
 enum class TermuxSetupIssue {
     Ready,
@@ -55,9 +60,25 @@ class TermuxBashTool(
     private val diagnosticLogger: AetherDiagnosticLogger = AetherDiagnosticLogger.NoOp,
 ) {
     private val environmentVariables = AtomicReference<List<TermuxEnvironmentVariable>>(emptyList())
+    private val autoCleanOldCommandHistory = AtomicReference(true)
+    private val oldCommandHistoryRetentionHours = AtomicInteger(DefaultOldCommandHistoryRetentionHours)
+    private val lastManagedBashRunPruneAtMillis = AtomicLong(0L)
 
     fun setEnvironmentVariables(variables: List<TermuxEnvironmentVariable>) {
         environmentVariables.set(normalizeTermuxEnvironmentVariables(variables))
+    }
+
+    fun setManagedBashRunCleanupPolicy(
+        enabled: Boolean,
+        retentionHours: Int,
+    ) {
+        autoCleanOldCommandHistory.set(enabled)
+        oldCommandHistoryRetentionHours.set(
+            retentionHours.coerceIn(
+                minimumValue = MinOldCommandHistoryRetentionHours,
+                maximumValue = MaxOldCommandHistoryRetentionHours,
+            )
+        )
     }
 
     @Suppress("UNUSED_PARAMETER")
@@ -151,6 +172,7 @@ class TermuxBashTool(
                 stderr = raw.optString("stderr"),
             )
         }
+        maybePruneExpiredManagedBashRuns()
         try {
             val startedAtMillis = System.currentTimeMillis()
             val initialResult = executeManagedScript(
@@ -173,6 +195,58 @@ class TermuxBashTool(
         } catch (cancellationException: CancellationException) {
             runCatching { killExecutionByRunId(runId) }
             throw cancellationException
+        }
+    }
+
+
+    private suspend fun maybePruneExpiredManagedBashRuns() {
+        if (!autoCleanOldCommandHistory.get()) return
+        val nowMillis = System.currentTimeMillis()
+        val previousPruneMillis = lastManagedBashRunPruneAtMillis.get()
+        if (nowMillis - previousPruneMillis < ManagedBashRunPruneThrottleMillis) return
+        if (!lastManagedBashRunPruneAtMillis.compareAndSet(previousPruneMillis, nowMillis)) return
+
+        val retentionMillis = oldCommandHistoryRetentionHours.get() * 60L * 60L * 1000L
+        val raw = runCatching {
+            JSONObject(
+                dispatchCommand(
+                    command = buildPruneExpiredManagedBashRunsScript(retentionMillis),
+                    workingDirectory = TermuxContract.HomeDirectory,
+                    awaitTimeoutMillis = InternalCommandTimeoutMillis,
+                )
+            )
+        }.getOrElse { throwable ->
+            lastManagedBashRunPruneAtMillis.set(0L)
+            diagnosticLogger.exception(
+                category = "storage",
+                event = "old_command_history_cleanup_failed",
+                throwable = throwable,
+                level = "warn",
+            )
+            return
+        }
+
+        if (raw.optBoolean("ok")) {
+            val values = parseKeyValueOutput(raw.optString("stdout"))
+            diagnosticLogger.event(
+                category = "storage",
+                event = "old_command_history_cleanup_completed",
+                details = mapOf(
+                    "deleted_count" to (values["expired_bash_runs_deleted"] ?: "0"),
+                    "retention_hours" to oldCommandHistoryRetentionHours.get(),
+                ),
+            )
+        } else {
+            lastManagedBashRunPruneAtMillis.set(0L)
+            diagnosticLogger.event(
+                category = "storage",
+                event = "old_command_history_cleanup_failed",
+                level = "warn",
+                details = mapOf(
+                    "message" to raw.optString("errmsg").ifBlank { raw.optString("stderr") },
+                    "retention_hours" to oldCommandHistoryRetentionHours.get(),
+                ),
+            )
         }
     }
 
@@ -706,6 +780,46 @@ class TermuxBashTool(
             put("hint", hint)
         }
     }.toString()
+
+
+    private fun buildPruneExpiredManagedBashRunsScript(retentionMillis: Long): String = buildString {
+        appendManagedShellPreamble(this)
+        appendLine("read_trimmed_file() {")
+        appendLine("  local file_path=\"\$1\"")
+        appendLine("  if [ ! -f \"\$file_path\" ]; then")
+        appendLine("    printf ''")
+        appendLine("    return 0")
+        appendLine("  fi")
+        appendLine("  tr -d '[:space:]' < \"\$file_path\"")
+        appendLine("}")
+        appendLine("bash_runs_dir='${escapeForSingleQuoted(TermuxContract.ManagedCommandsDirectory)}'")
+        appendLine("bash_runs_deleted=0")
+        appendLine("bash_runs_retention_ms=${retentionMillis.coerceAtLeast(1L)}")
+        appendLine("now_ms=\"\$(date +%s%3N)\"")
+        appendLine("if [ -d \"\$bash_runs_dir\" ]; then")
+        appendLine("  for run_dir in \"\$bash_runs_dir\"/*; do")
+        appendLine("    [ -d \"\$run_dir\" ] || continue")
+        appendLine("    state=\"\$(read_trimmed_file \"\$run_dir/state\")\"")
+        appendLine("    case \"\$state\" in")
+        appendLine("      completed|failed|cancelled|killed) ;;")
+        appendLine("      *) continue ;;")
+        appendLine("    esac")
+        appendLine("    finished_at=\"\$(read_trimmed_file \"\$run_dir/finished_at\")\"")
+        appendLine("    case \"\$finished_at\" in")
+        appendLine("      ''|*[!0-9]*)")
+        appendLine("        modified_seconds=\"\$(stat -c %Y \"\$run_dir\" 2>/dev/null || printf '0')\"")
+        appendLine("        finished_at=\$((modified_seconds * 1000))")
+        appendLine("        ;;")
+        appendLine("    esac")
+        appendLine("    age_ms=\$((now_ms - finished_at))")
+        appendLine("    if [ \"\$age_ms\" -ge \"\$bash_runs_retention_ms\" ]; then")
+        appendLine("      rm -rf -- \"\$run_dir\"")
+        appendLine("      bash_runs_deleted=\$((bash_runs_deleted + 1))")
+        appendLine("    fi")
+        appendLine("  done")
+        appendLine("fi")
+        appendLine("emit_kv expired_bash_runs_deleted \"\$bash_runs_deleted\"")
+    }
 
     private fun buildLaunchManagedCommandScript(
         runId: String,

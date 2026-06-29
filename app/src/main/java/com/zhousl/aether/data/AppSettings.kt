@@ -162,6 +162,8 @@ data class AppSettings(
     val keepTasksRunningInBackground: Boolean = true,
     val notifyOnTaskCompletion: Boolean = true,
     val agentWorkspaceMode: AgentWorkspaceMode = AgentWorkspaceMode.Shared,
+    val autoCleanOldCommandHistory: Boolean = true,
+    val oldCommandHistoryRetentionHours: Int = DefaultOldCommandHistoryRetentionHours,
     val termuxSetupCompleted: Boolean = false,
     val termuxSetupNoticeDismissed: Boolean = false,
     val termuxLiveOutputEnabled: Boolean = true,
@@ -199,6 +201,9 @@ data class TermuxEnvironmentVariable(
 
 const val CurrentOnboardingVersion = 1
 const val DefaultLlmInactivityReconnectTimeoutSeconds = 360
+const val DefaultOldCommandHistoryRetentionHours = 6
+const val MinOldCommandHistoryRetentionHours = 1
+const val MaxOldCommandHistoryRetentionHours = 168
 private const val MinLlmInactivityReconnectTimeoutSeconds = 30
 private const val MaxLlmInactivityReconnectTimeoutSeconds = 3600
 const val OnboardingStarterPrompt = "Hi"
@@ -211,6 +216,17 @@ fun defaultAppLanguage(
     AppLanguage.SimplifiedChinese
 } else {
     AppLanguage.English
+}
+
+
+fun normalizeOldCommandHistoryRetentionHours(
+    value: Int?,
+): Int = when (value) {
+    null -> DefaultOldCommandHistoryRetentionHours
+    else -> value.coerceIn(
+        minimumValue = MinOldCommandHistoryRetentionHours,
+        maximumValue = MaxOldCommandHistoryRetentionHours,
+    )
 }
 
 fun normalizeLlmInactivityReconnectTimeoutSeconds(
