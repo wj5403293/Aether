@@ -15,7 +15,7 @@ import org.junit.Test
 
 class ChatRepositorySerializationTest {
     @Test
-    fun serializationDropsInlineImageBytesButKeepsWorkspacePath() {
+    fun serializationKeepsInlineImageBytesAndWorkspacePath() {
         val serialized = serializeChatSessions(
             listOf(
                 ChatSession(
@@ -52,12 +52,12 @@ class ChatRepositorySerializationTest {
             .getJSONArray("attachments")
             .getJSONObject(0)
 
-        assertFalse(attachment.has("inlineBase64"))
+        assertEquals("a".repeat(120_000), attachment.getString("inlineBase64"))
         assertEquals("/workspace/image.png", attachment.getString("workspacePath"))
     }
 
     @Test
-    fun serializationCompactsLargeToolOutputJson() {
+    fun serializationKeepsLargeToolOutputJson() {
         val serialized = serializeChatSessions(
             listOf(
                 ChatSession(
@@ -97,7 +97,58 @@ class ChatRepositorySerializationTest {
             .getString("outputJson")
         val output = JSONObject(outputJson)
 
-        assertTrue(output.getBoolean("aetherPersistedOutputTruncated"))
-        assertTrue(output.getString("stdout").length < 40_000)
+        assertTrue(output.getBoolean("ok"))
+        assertEquals("x".repeat(140_000), output.getString("stdout"))
+    }
+
+    @Test
+    fun migrationParseResultMarksCorruptedJsonAsRecoverable() {
+        val result = parseChatSessionsForMigration("{not-valid-json")
+
+        assertTrue(result.recoveredFromCorruption)
+        assertEquals(1, result.sessions.size)
+        assertTrue(result.sessions.first().id.startsWith("corrupt-chat-state-"))
+    }
+
+    @Test
+    fun migrationParseResultKeepsValidJsonSuccessful() {
+        val result = parseChatSessionsForMigration(
+            """
+                [{"id":"session-1","title":"First","preview":"First","messages":[]}]
+            """.trimIndent()
+        )
+
+        assertFalse(result.recoveredFromCorruption)
+        assertEquals("session-1", result.sessions.single().id)
+    }
+
+    @Test
+    fun migrationKeepsLegacyCurrentSessionWhenItExists() {
+        val sessions = listOf(
+            ChatSession(id = "session-1", title = "First", preview = "First", messages = emptyList()),
+            ChatSession(id = "session-2", title = "Second", preview = "Second", messages = emptyList()),
+        )
+
+        val currentSessionId = resolveLegacyCurrentSessionIdForMigration(
+            legacyCurrentSessionId = "session-2",
+            legacySessions = sessions,
+        )
+
+        assertEquals("session-2", currentSessionId)
+    }
+
+    @Test
+    fun migrationFallsBackToFirstSessionWhenLegacyCurrentSessionIsMissing() {
+        val sessions = listOf(
+            ChatSession(id = "session-1", title = "First", preview = "First", messages = emptyList()),
+            ChatSession(id = "session-2", title = "Second", preview = "Second", messages = emptyList()),
+        )
+
+        val currentSessionId = resolveLegacyCurrentSessionIdForMigration(
+            legacyCurrentSessionId = "missing-session",
+            legacySessions = sessions,
+        )
+
+        assertEquals("session-1", currentSessionId)
     }
 }

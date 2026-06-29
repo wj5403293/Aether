@@ -1,9 +1,18 @@
 package com.zhousl.aether.data
 
 import android.content.Context
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import androidx.room.withTransaction
+import com.zhousl.aether.data.chatdb.ChatHistoryDao
+import com.zhousl.aether.data.chatdb.ChatHistoryDatabase
+import com.zhousl.aether.data.chatdb.ChatMessageEntity
+import com.zhousl.aether.data.chatdb.ChatSessionEntity
+import com.zhousl.aether.data.chatdb.ChatSessionSnapshot
+import com.zhousl.aether.data.chatdb.ChatStateMetaEntity
+
 import com.zhousl.aether.ui.AttachmentKind
 import com.zhousl.aether.ui.AttachmentWorkspaceState
 import com.zhousl.aether.ui.ChatAttachment
@@ -17,18 +26,22 @@ import com.zhousl.aether.ui.MessageDisplayKind
 import com.zhousl.aether.ui.ReasoningSummaryChunk
 import com.zhousl.aether.ui.ReasoningTrace
 import com.zhousl.aether.ui.syncActiveBranches
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONArray
 import org.json.JSONObject
 
 private const val DraftSessionId = "draft"
-private const val PersistedReasoningRawTextMaxChars = 12_000
-private const val PersistedProviderPayloadJsonMaxChars = 120_000
-private const val PersistedToolArgumentsJsonMaxChars = 24_000
-private const val PersistedToolOutputJsonMaxChars = 72_000
-private const val PersistedReasoningSummaryRawTextMaxChars = 4_000
-private const val PersistedJsonStringValueMaxChars = 16_000
+
 
 private val Context.chatDataStore by preferencesDataStore(name = "aether_chats")
 
@@ -39,16 +52,44 @@ data class PersistedChatState(
 
 class ChatRepository(
     private val context: Context,
+    private val database: ChatHistoryDatabase = ChatHistoryDatabase.getInstance(context),
 ) {
-    val chatState: Flow<PersistedChatState> = context.chatDataStore.data.map { preferences ->
-        val sessions = parseChatSessions(preferences[SESSIONS_JSON].orEmpty())
-        val storedSessionId = preferences[CURRENT_SESSION_ID] ?: DraftSessionId
-        PersistedChatState(
-            sessions = sessions,
-            currentSessionId = storedSessionId
-                .takeIf { id -> id == DraftSessionId || sessions.any { it.id == id } }
-                ?: sessions.firstOrNull()?.id
-                ?: DraftSessionId,
+    private val chatHistoryDao: ChatHistoryDao = database.chatHistoryDao()
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val chatState: Flow<PersistedChatState> = flow {
+        migrateLegacyChatStateIfNeeded()
+        emitAll(
+            combine(
+                chatHistoryDao.observeSessions(),
+                chatHistoryDao.observeMeta(),
+            ) { sessionRows, meta ->
+                val currentSessionId = meta?.currentSessionId ?: DraftSessionId
+                SessionListState(
+                    rows = sessionRows,
+                    currentSessionId = currentSessionId
+                        .takeIf { id -> id == DraftSessionId || sessionRows.any { it.id == id } }
+                        ?: sessionRows.firstOrNull()?.id
+                        ?: DraftSessionId,
+                )
+            }.flatMapLatest { state ->
+                val sessionIds = state.rows.map { it.id }
+                val messagesFlow = if (sessionIds.isEmpty()) {
+                    flowOf(emptyList())
+                } else {
+                    chatHistoryDao.observeMessagesForSessions(sessionIds)
+                }
+                messagesFlow.map { messages ->
+                    val messagesBySessionId = messages.groupBy { it.sessionId }
+                    val sessions = state.rows.map { session ->
+                        session.toChatSession(messagesBySessionId[session.id].orEmpty())
+                    }
+                    PersistedChatState(
+                        sessions = sessions,
+                        currentSessionId = state.currentSessionId,
+                    )
+                }
+            }
         )
     }
 
@@ -56,46 +97,346 @@ class ChatRepository(
         sessions: List<ChatSession>,
         currentSessionId: String,
     ) {
-        context.chatDataStore.edit {
-            it[SESSIONS_JSON] = serializeChatSessions(sessions)
-            it[CURRENT_SESSION_ID] = currentSessionId
+        migrateLegacyChatStateIfNeeded()
+        replaceChatState(
+            sessions = sessions.mapIndexed { index, session -> session.toSnapshot(index) },
+            currentSessionId = currentSessionId,
+            migrationComplete = true,
+        )
+        context.chatDataStore.edit { preferences ->
+            preferences.remove(SESSIONS_JSON)
+            preferences.remove(CURRENT_SESSION_ID)
+            preferences[ROOM_MIGRATION_COMPLETE] = true
         }
     }
+
+
+    suspend fun upsertSessionSnapshot(
+        session: ChatSession,
+        sortOrder: Long,
+    ) {
+        migrateLegacyChatStateIfNeeded()
+        database.withTransaction {
+            chatHistoryDao.upsertSession(session.toSessionEntity(sortOrder))
+        }
+    }
+
+    suspend fun upsertMessageSnapshot(
+        sessionId: String,
+        message: ChatMessage,
+        position: Int,
+    ) {
+        migrateLegacyChatStateIfNeeded()
+        database.withTransaction {
+            chatHistoryDao.upsertMessage(
+                ChatMessageEntityMapper.toEntity(
+                    sessionId = sessionId,
+                    position = position,
+                    message = message,
+                )
+            )
+        }
+    }
+
+    suspend fun deleteSessionById(sessionId: String) {
+        migrateLegacyChatStateIfNeeded()
+        database.withTransaction {
+            chatHistoryDao.deleteSession(sessionId)
+            val meta = chatHistoryDao.getMeta()
+            if (meta?.currentSessionId == sessionId) {
+                chatHistoryDao.upsertMeta(meta.copy(currentSessionId = DraftSessionId))
+            }
+        }
+    }
+
+    suspend fun replaceMessagesFromPosition(
+        sessionId: String,
+        fromPosition: Int,
+        messages: List<ChatMessage>,
+    ) {
+        migrateLegacyChatStateIfNeeded()
+        database.withTransaction {
+            replaceMessagesFromPositionInTransaction(sessionId, fromPosition, messages)
+        }
+    }
+
+    private suspend fun replaceMessagesFromPositionInTransaction(
+        sessionId: String,
+        fromPosition: Int,
+        messages: List<ChatMessage>,
+    ) {
+        chatHistoryDao.deleteMessagesFromPosition(sessionId, fromPosition)
+        if (messages.isNotEmpty()) {
+            chatHistoryDao.upsertMessages(
+                messages.mapIndexed { index, message ->
+                    ChatMessageEntityMapper.toEntity(
+                        sessionId = sessionId,
+                        position = fromPosition + index,
+                        message = message,
+                    )
+                }
+            )
+        }
+    }
+
+    private suspend fun replaceChatState(
+        sessions: List<ChatSessionSnapshot>,
+        currentSessionId: String,
+        migrationComplete: Boolean,
+    ) {
+        database.withTransaction {
+            val safeCurrentSessionId = currentSessionId
+                .takeIf { id -> id == DraftSessionId || sessions.any { it.session.id == id } }
+                ?: sessions.firstOrNull()?.session?.id
+                ?: DraftSessionId
+            chatHistoryDao.upsertMeta(
+                ChatStateMetaEntity(
+                    currentSessionId = safeCurrentSessionId,
+                    roomMigrationComplete = migrationComplete,
+                )
+            )
+            if (sessions.isEmpty()) {
+                chatHistoryDao.deleteAllMessages()
+                chatHistoryDao.deleteAllSessions()
+                return@withTransaction
+            }
+
+            val sessionEntities = sessions.map { it.session }
+            val sessionIds = sessionEntities.map { it.id }
+            chatHistoryDao.upsertSessions(sessionEntities)
+            chatHistoryDao.deleteSessionsExcept(sessionIds)
+            chatHistoryDao.deleteMessagesExceptSessions(sessionIds)
+
+            sessions.forEach { snapshot ->
+                chatHistoryDao.deleteMessagesForSession(snapshot.session.id)
+                if (snapshot.messages.isNotEmpty()) {
+                    chatHistoryDao.upsertMessages(snapshot.messages)
+                }
+            }
+        }
+    }
+
+    // TODO(Room v2): remove legacy DataStore chat import.
+    private suspend fun migrateLegacyChatStateIfNeeded() = migrationMutex.withLock {
+        val preferences = context.chatDataStore.data.first()
+        val legacySessionsJson = preferences[SESSIONS_JSON].orEmpty()
+        val legacyMigrationComplete = preferences[ROOM_MIGRATION_COMPLETE] == true
+        val legacyCurrentSessionId = preferences[CURRENT_SESSION_ID] ?: DraftSessionId
+        val roomMeta = chatHistoryDao.getMeta()
+
+        if (roomMeta?.roomMigrationComplete == true) {
+            if (legacySessionsJson.isNotBlank() || preferences[CURRENT_SESSION_ID] != null) {
+                context.chatDataStore.edit { data ->
+                    data.remove(SESSIONS_JSON)
+                    data.remove(CURRENT_SESSION_ID)
+                    data[ROOM_MIGRATION_COMPLETE] = true
+                }
+            }
+            return@withLock
+        }
+
+        if (legacyMigrationComplete && legacySessionsJson.isBlank()) {
+            database.withTransaction {
+                chatHistoryDao.upsertMeta(
+                    ChatStateMetaEntity(
+                        currentSessionId = legacyCurrentSessionId,
+                        roomMigrationComplete = true,
+                    )
+                )
+            }
+            if (preferences[CURRENT_SESSION_ID] != null) {
+                context.chatDataStore.edit { data ->
+                    data.remove(CURRENT_SESSION_ID)
+                    data[ROOM_MIGRATION_COMPLETE] = true
+                }
+            }
+            return@withLock
+        }
+
+        if (legacySessionsJson.isBlank()) {
+            database.withTransaction {
+                chatHistoryDao.upsertMeta(
+                    ChatStateMetaEntity(
+                        currentSessionId = legacyCurrentSessionId,
+                        roomMigrationComplete = true,
+                    )
+                )
+            }
+            context.chatDataStore.edit { data ->
+                data.remove(SESSIONS_JSON)
+                data.remove(CURRENT_SESSION_ID)
+                data[ROOM_MIGRATION_COMPLETE] = true
+            }
+            return@withLock
+        }
+
+        val legacyParseResult = parseChatSessionsForMigration(legacySessionsJson)
+        val legacySessions = legacyParseResult.sessions
+        if (legacyParseResult.recoveredFromCorruption) {
+            // TODO(Room v2): remove with legacy DataStore chat import.
+            replaceChatState(
+                sessions = legacySessions.mapIndexed { index, session -> session.toSnapshot(index) },
+                currentSessionId = resolveLegacyCurrentSessionIdForMigration(
+                    legacyCurrentSessionId = legacyCurrentSessionId,
+                    legacySessions = legacySessions,
+                ),
+                migrationComplete = true,
+            )
+            context.chatDataStore.edit { data ->
+                data.remove(SESSIONS_JSON)
+                data.remove(CURRENT_SESSION_ID)
+                data[ROOM_MIGRATION_COMPLETE] = true
+            }
+            return@withLock
+        }
+        if (legacySessions.isNotEmpty()) {
+            replaceChatState(
+                sessions = legacySessions.mapIndexed { index, session -> session.toSnapshot(index) },
+                currentSessionId = resolveLegacyCurrentSessionIdForMigration(
+                    legacyCurrentSessionId = legacyCurrentSessionId,
+                    legacySessions = legacySessions,
+                ),
+                migrationComplete = true,
+            )
+            context.chatDataStore.edit { data ->
+                data.remove(SESSIONS_JSON)
+                data.remove(CURRENT_SESSION_ID)
+                data[ROOM_MIGRATION_COMPLETE] = true
+            }
+            return@withLock
+        }
+
+        database.withTransaction {
+            chatHistoryDao.upsertMeta(
+                ChatStateMetaEntity(
+                    currentSessionId = legacyCurrentSessionId,
+                    roomMigrationComplete = true,
+                )
+            )
+        }
+        context.chatDataStore.edit { data ->
+            data.remove(SESSIONS_JSON)
+            data.remove(CURRENT_SESSION_ID)
+            data[ROOM_MIGRATION_COMPLETE] = true
+        }
+    }
+
 
     private companion object {
         val SESSIONS_JSON = stringPreferencesKey("sessions_json")
         val CURRENT_SESSION_ID = stringPreferencesKey("current_session_id")
+        val ROOM_MIGRATION_COMPLETE = booleanPreferencesKey("room_migration_complete")
+        val migrationMutex = Mutex()
     }
 }
 
-internal fun parseChatSessions(rawValue: String): List<ChatSession> {
-    if (rawValue.isBlank()) return emptyList()
+internal fun resolveLegacyCurrentSessionIdForMigration(
+    legacyCurrentSessionId: String,
+    legacySessions: List<ChatSession>,
+): String {
+    if (legacySessions.isEmpty()) return DraftSessionId
+    val firstSessionId = legacySessions.first().id
+    return legacyCurrentSessionId
+        .takeIf { id -> id == DraftSessionId || legacySessions.any { it.id == id } }
+        ?: firstSessionId.takeIf { it.isNotBlank() }
+        ?: DraftSessionId
+}
+
+private data class SessionListState(
+    val rows: List<ChatSessionEntity>,
+    val currentSessionId: String,
+)
+
+private fun ChatSession.toSessionEntity(sortOrder: Long): ChatSessionEntity = ChatSessionEntity(
+    id = id,
+    title = title,
+    preview = preview,
+    hasCustomTitle = hasCustomTitle,
+    selectedSkillIdsJson = JSONArray().apply { selectedSkillIds.forEach(::put) }.toString(),
+    activeSkillsJson = serializeActiveSkillContexts(activeSkills),
+    activeMcpServerIdsJson = JSONArray().apply { activeMcpServerIds.forEach(::put) }.toString(),
+    agentModeEnabled = agentModeEnabled,
+    selectedModelKey = selectedModelKey,
+    sortOrder = sortOrder,
+)
+
+private fun ChatSession.toSnapshot(index: Int): ChatSessionSnapshot = ChatSessionSnapshot(
+    session = toSessionEntity(index.toLong()),
+    messages = syncActiveBranches(messages).mapIndexed { messageIndex, message ->
+        ChatMessageEntityMapper.toEntity(
+            sessionId = id,
+            position = messageIndex,
+            message = message,
+        )
+    },
+)
+
+private fun ChatSessionEntity.toChatSession(messages: List<ChatMessageEntity>): ChatSession {
+    val orderedMessages = messages.sortedBy { it.position }.mapIndexed { index, message ->
+        ChatMessageEntityMapper.toChatMessage(message, index)
+    }
+    val activeSkills = parseActiveSkillContexts(activeSkillsJson)
+    return ChatSession(
+        id = id,
+        title = title,
+        preview = preview,
+        hasCustomTitle = hasCustomTitle,
+        messages = orderedMessages,
+        selectedSkillIds = parseStringList(selectedSkillIdsJson).ifEmpty { activeSkills.map { it.skillId } },
+        activeSkills = activeSkills,
+        activeMcpServerIds = parseStringList(activeMcpServerIdsJson),
+        agentModeEnabled = agentModeEnabled,
+        selectedModelKey = selectedModelKey,
+    )
+}
+
+internal fun parseChatSessions(rawValue: String): List<ChatSession> =
+    parseChatSessionsForMigration(rawValue).sessions
+
+internal data class LegacyChatSessionsParseResult(
+    val sessions: List<ChatSession>,
+    val recoveredFromCorruption: Boolean,
+)
+
+internal fun parseChatSessionsForMigration(rawValue: String): LegacyChatSessionsParseResult {
+    if (rawValue.isBlank()) {
+        return LegacyChatSessionsParseResult(
+            sessions = emptyList(),
+            recoveredFromCorruption = false,
+        )
+    }
 
     return runCatching {
         val sessions = JSONArray(rawValue)
-        buildList {
-            for (sessionIndex in 0 until sessions.length()) {
-                val session = sessions.optJSONObject(sessionIndex) ?: continue
-                add(
-                    ChatSession(
-                        id = session.optString("id").ifBlank { "session-$sessionIndex" },
-                        title = session.optString("title"),
-                        preview = session.optString("preview"),
-                        hasCustomTitle = session.optBoolean("hasCustomTitle", false),
-                        messages = parseMessages(session.optJSONArray("messages")),
-                        selectedSkillIds = parseStringList(session.optJSONArray("selectedSkillIds")).ifEmpty {
-                            parseActiveSkillContexts(session.optString("activeSkillsJson")).map { it.skillId }
-                        },
-                        activeSkills = parseActiveSkillContexts(session.optString("activeSkillsJson")),
-                        activeMcpServerIds = parseStringList(session.optJSONArray("activeMcpServerIds")),
-                        agentModeEnabled = session.optBoolean("agentModeEnabled", false),
-                        selectedModelKey = session.optString("selectedModelKey"),
+        LegacyChatSessionsParseResult(
+            sessions = buildList {
+                for (sessionIndex in 0 until sessions.length()) {
+                    val session = sessions.optJSONObject(sessionIndex) ?: continue
+                    add(
+                        ChatSession(
+                            id = session.optString("id").ifBlank { "session-$sessionIndex" },
+                            title = session.optString("title"),
+                            preview = session.optString("preview"),
+                            hasCustomTitle = session.optBoolean("hasCustomTitle", false),
+                            messages = parseMessages(session.optJSONArray("messages")),
+                            selectedSkillIds = parseStringList(session.optJSONArray("selectedSkillIds")).ifEmpty {
+                                parseActiveSkillContexts(session.optString("activeSkillsJson")).map { it.skillId }
+                            },
+                            activeSkills = parseActiveSkillContexts(session.optString("activeSkillsJson")),
+                            activeMcpServerIds = parseStringList(session.optJSONArray("activeMcpServerIds")),
+                            agentModeEnabled = session.optBoolean("agentModeEnabled", false),
+                            selectedModelKey = session.optString("selectedModelKey"),
+                        )
                     )
-                )
-            }
-        }
+                }
+            },
+            recoveredFromCorruption = false,
+        )
     }.getOrElse { throwable ->
-        listOf(corruptedChatStateSession(rawValue, throwable))
+        LegacyChatSessionsParseResult(
+            sessions = listOf(corruptedChatStateSession(rawValue, throwable)),
+            recoveredFromCorruption = true,
+        )
     }
 }
 
@@ -118,12 +459,14 @@ private fun corruptedChatStateSession(
     ),
 )
 
-internal fun serializeChatSessions(sessions: List<ChatSession>): String =
-    JSONArray().apply {
-        sessions.forEach { session ->
-            put(session.toJson())
-        }
-    }.toString()
+internal fun serializeChatSessions(sessions: List<ChatSession>): String = buildString {
+    append('[')
+    sessions.forEachIndexed { index, session ->
+        if (index > 0) append(',')
+        append(session.toJson().toString())
+    }
+    append(']')
+}
 
 internal fun ChatSession.toJson(): JSONObject = JSONObject().apply {
     put("id", id)
@@ -144,40 +487,41 @@ private fun parseMessages(messages: JSONArray?): List<ChatMessage> {
     return buildList {
         for (messageIndex in 0 until messages.length()) {
             val message = messages.optJSONObject(messageIndex) ?: continue
-            add(
-                ChatMessage(
-                    id = message.optString("id").ifBlank { "message-$messageIndex" },
-                    author = if (message.optString("author") == MessageAuthor.User.name) {
-                        MessageAuthor.User
-                    } else {
-                        MessageAuthor.Agent
-                    },
-                    text = message.optString("text"),
-                    createdAtMillis = message.optLong("createdAtMillis").takeIf { it > 0L }
-                        ?: timestampFromMessageId(message.optString("id")),
-                    attachments = parseAttachments(message.optJSONArray("attachments")),
-                    toolInvocations = parseToolInvocations(message.optJSONArray("toolInvocations")),
-                    thoughtDurationMillis = if (message.has("thoughtDurationMillis")) {
-                        message.optLong("thoughtDurationMillis")
-                    } else {
-                        null
-                    },
-                    reasoningTrace = parseReasoningTrace(message.optJSONObject("reasoningTrace")),
-                    branchGroup = parseBranchGroup(message.optJSONObject("branchGroup")),
-                    responseGroupId = message.optString("responseGroupId").ifBlank { null },
-                    assistantActionsHidden = message.optBoolean("assistantActionsHidden"),
-                    providerPayloadJson = message.optString("providerPayloadJson"),
-                    displayKind = MessageDisplayKind.entries.firstOrNull {
-                        it.name == message.optString("displayKind")
-                    } ?: MessageDisplayKind.Standard,
-                    usageStatistics = parseUsageStatistics(message.optJSONObject("usageStatistics")),
-                )
-            )
+            add(parseMessage(message, messageIndex))
         }
     }
 }
 
-private fun ChatMessage.toJson(): JSONObject = JSONObject().apply {
+internal fun parseMessage(message: JSONObject, messageIndex: Int): ChatMessage = ChatMessage(
+    id = message.optString("id").ifBlank { "message-$messageIndex" },
+    author = if (message.optString("author") == MessageAuthor.User.name) {
+        MessageAuthor.User
+    } else {
+        MessageAuthor.Agent
+    },
+    text = message.optString("text"),
+    createdAtMillis = message.optLong("createdAtMillis").takeIf { it > 0L }
+        ?: timestampFromMessageId(message.optString("id")),
+    attachments = parseAttachments(message.optJSONArray("attachments")),
+    toolInvocations = parseToolInvocations(message.optJSONArray("toolInvocations")),
+    thoughtDurationMillis = if (message.has("thoughtDurationMillis")) {
+        message.optLong("thoughtDurationMillis")
+    } else {
+        null
+    },
+    reasoningTrace = parseReasoningTrace(message.optJSONObject("reasoningTrace")),
+    branchGroup = parseBranchGroup(message.optJSONObject("branchGroup")),
+    responseGroupId = message.optString("responseGroupId").ifBlank { null },
+    assistantActionsHidden = message.optBoolean("assistantActionsHidden"),
+    providerPayloadJson = message.optString("providerPayloadJson"),
+    displayKind = parseMessageDisplayKind(message.optString("displayKind")),
+    usageStatistics = parseUsageStatistics(message.optJSONObject("usageStatistics")),
+)
+
+private fun parseMessageDisplayKind(value: String): MessageDisplayKind =
+    MessageDisplayKind.entries.firstOrNull { it.name == value } ?: MessageDisplayKind.Standard
+
+internal fun ChatMessage.toJson(): JSONObject = JSONObject().apply {
     put("id", id)
     put("author", author.name)
     put("text", text)
@@ -191,9 +535,9 @@ private fun ChatMessage.toJson(): JSONObject = JSONObject().apply {
     if (assistantActionsHidden) {
         put("assistantActionsHidden", true)
     }
-    truncatePersistedText(providerPayloadJson, PersistedProviderPayloadJsonMaxChars)
-        .takeIf { it.isNotBlank() }
-        ?.let { put("providerPayloadJson", it) }
+    providerPayloadJson.takeIf { it.isNotBlank() }?.let {
+        put("providerPayloadJson", it)
+    }
     if (displayKind != MessageDisplayKind.Standard) {
         put("displayKind", displayKind.name)
     }
@@ -307,6 +651,9 @@ private fun ChatAttachment.toJson(): JSONObject = JSONObject().apply {
     put("kind", kind.name)
     put("workspacePath", workspacePath)
     sizeBytes?.let { put("sizeBytes", it) }
+    inlineBase64.takeIf { it.isNotBlank() }?.let {
+        put("inlineBase64", it)
+    }
 }
 
 private fun parseReasoningTrace(json: JSONObject?): ReasoningTrace? {
@@ -329,7 +676,7 @@ private fun parseReasoningTrace(json: JSONObject?): ReasoningTrace? {
 
 private fun ReasoningTrace.toJson(): JSONObject = JSONObject().apply {
     put("id", id)
-    put("rawText", if (hasSummary) "" else truncatePersistedText(rawText, PersistedReasoningRawTextMaxChars))
+    put("rawText", if (hasSummary) "" else rawText)
     put("latestStatusText", latestStatusText)
     put("startedAtMillis", startedAtMillis)
     completedAtMillis?.let { put("completedAtMillis", it) }
@@ -363,11 +710,7 @@ private fun ReasoningSummaryChunk.toJson(): JSONObject = JSONObject().apply {
     put("detail", detail)
     put(
         "rawText",
-        if (title.isNotBlank() || detail.isNotBlank()) {
-            ""
-        } else {
-            truncatePersistedText(rawText, PersistedReasoningSummaryRawTextMaxChars)
-        },
+        if (title.isNotBlank() || detail.isNotBlank()) "" else rawText,
     )
     put("isPending", isPending)
     put("createdAtMillis", createdAtMillis)
@@ -409,8 +752,8 @@ private fun parseToolInvocations(toolInvocations: JSONArray?): List<ChatToolInvo
 private fun ChatToolInvocation.toJson(): JSONObject = JSONObject().apply {
     put("id", id)
     put("toolName", toolName)
-    put("argumentsJson", truncatePersistedJson(argumentsJson, PersistedToolArgumentsJsonMaxChars))
-    put("outputJson", truncatePersistedJson(outputJson, PersistedToolOutputJsonMaxChars))
+    put("argumentsJson", argumentsJson)
+    put("outputJson", outputJson)
     put("isRunning", isRunning)
     put("startedAtUptimeMillis", startedAtUptimeMillis)
     completedAtUptimeMillis?.let { put("completedAtUptimeMillis", it) }
@@ -418,6 +761,10 @@ private fun ChatToolInvocation.toJson(): JSONObject = JSONObject().apply {
     completedAtMillis?.let { put("completedAtMillis", it) }
     put("timelineOrder", timelineOrder)
 }
+
+private fun parseStringList(rawValue: String): List<String> = runCatching {
+    parseStringList(JSONArray(rawValue))
+}.getOrDefault(emptyList())
 
 private fun parseStringList(array: JSONArray?): List<String> {
     if (array == null) return emptyList()
@@ -431,50 +778,7 @@ private fun parseStringList(array: JSONArray?): List<String> {
     }
 }
 
-private fun timestampFromMessageId(messageId: String): Long {
+internal fun timestampFromMessageId(messageId: String): Long {
     val timestamp = messageId.substringAfterLast('-', missingDelimiterValue = "")
     return timestamp.toLongOrNull()?.takeIf { it > 0L } ?: 0L
-}
-
-private fun truncatePersistedText(
-    value: String,
-    maxChars: Int,
-): String {
-    if (value.length <= maxChars) return value
-    val omittedChars = value.length - maxChars
-    return value.take(maxChars) + "\n\n[... $omittedChars characters omitted from persisted chat storage]"
-}
-
-private fun truncatePersistedJson(
-    value: String,
-    maxChars: Int,
-): String {
-    if (value.length <= maxChars) return value
-    val parsed = runCatching { JSONObject(value) }.getOrNull()
-    if (parsed != null) {
-        val compactedText = compactPersistedJsonObject(parsed).toString()
-        if (compactedText.length <= maxChars) return compactedText
-    }
-    return JSONObject().apply {
-        put("ok", false)
-        put("truncated", true)
-        put("text", truncatePersistedText(value, maxChars))
-    }.toString()
-}
-
-private fun compactPersistedJsonObject(json: JSONObject): JSONObject {
-    val compacted = JSONObject()
-    json.keys().forEach { key ->
-        val value = json.opt(key)
-        compacted.put(
-            key,
-            if (value is String) {
-                truncatePersistedText(value, PersistedJsonStringValueMaxChars)
-            } else {
-                value
-            },
-        )
-    }
-    compacted.put("aetherPersistedOutputTruncated", true)
-    return compacted
 }
