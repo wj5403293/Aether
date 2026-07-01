@@ -19,6 +19,10 @@ shizuku = "13.1.5"
 androidAppProcess = "1.4.3"
 posthogAndroid = "3.43.1"
 posthogAndroidGradlePlugin = "1.1.0"
+androidxTestCore = "1.6.1"
+androidxTestExtJunit = "1.2.1"
+room = "2.8.4"
+ksp = "2.3.9"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -48,10 +52,18 @@ shizuku-api = { group = "dev.rikka.shizuku", name = "api", version.ref = "shizuk
 shizuku-provider = { group = "dev.rikka.shizuku", name = "provider", version.ref = "shizuku" }
 android-app-process = { group = "io.github.iamr0s", name = "AndroidAppProcess", version.ref = "androidAppProcess" }
 posthog-android = { group = "com.posthog", name = "posthog-android", version.ref = "posthogAndroid" }
+androidx-room-runtime = { group = "androidx.room", name = "room-runtime", version.ref = "room" }
+androidx-room-ktx = { group = "androidx.room", name = "room-ktx", version.ref = "room" }
+androidx-room-compiler = { group = "androidx.room", name = "room-compiler", version.ref = "room" }
+androidx-room-testing = { group = "androidx.room", name = "room-testing", version.ref = "room" }
+androidx-test-core = { group = "androidx.test", name = "core", version.ref = "androidxTestCore" }
+androidx-test-runner = { group = "androidx.test", name = "runner", version.ref = "androidxTestCore" }
+androidx-test-ext-junit = { group = "androidx.test.ext", name = "junit", version.ref = "androidxTestExtJunit" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
 android-library = { id = "com.android.library", version.ref = "agp" }
 kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 compose-compiler = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }
 posthog-android = { id = "com.posthog.android", version.ref = "posthogAndroidGradlePlugin" }
