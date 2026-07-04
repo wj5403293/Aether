@@ -65,11 +65,12 @@ class ChatRepository(
     private val database: ChatHistoryDatabase = ChatHistoryDatabase.getInstance(context),
 ) {
     private val chatHistoryDao: ChatHistoryDao = database.chatHistoryDao()
+    private val restoredMessageCache = mutableMapOf<ChatMessageCacheKey, LoadedChatMessage>()
+    private val restoredMessageCacheMutex = Mutex()
 
     @OptIn(ExperimentalCoroutinesApi::class)
     val chatState: Flow<PersistedChatState> = flow {
         migrateLegacyChatStateIfNeeded()
-        val restoredMessageCache = mutableMapOf<ChatMessageCacheKey, LoadedChatMessage>()
         emitAll(
             combine(
                 chatHistoryDao.observeSessions(),
@@ -86,16 +87,18 @@ class ChatRepository(
             }.flatMapLatest { state ->
                 val sessionIds = state.rows.map { it.id }
                 val messagesFlow = if (sessionIds.isEmpty()) {
-                    restoredMessageCache.clear()
+                    clearRestoredMessageCache()
                     flowOf(emptyList())
                 } else {
                     chatHistoryDao.observeMessageSummariesForSessions(sessionIds).mapLatest { summaries ->
-                        restoredMessageCache.keys.retainAll(summaries.mapTo(mutableSetOf()) { it.cacheKey })
-                        database.withTransaction {
-                            chatHistoryDao.getMessagesForSummariesSafely(
-                                summaries = summaries,
-                                restoredMessageCache = restoredMessageCache,
-                            )
+                        restoredMessageCacheMutex.withLock {
+                            restoredMessageCache.keys.retainAll(summaries.mapTo(mutableSetOf()) { it.cacheKey })
+                            database.withTransaction {
+                                chatHistoryDao.getMessagesForSummariesSafely(
+                                    summaries = summaries,
+                                    restoredMessageCache = restoredMessageCache,
+                                )
+                            }
                         }
                     }
                 }
@@ -150,6 +153,7 @@ class ChatRepository(
     ) {
         require(position >= 0) { "position must be non-negative" }
         migrateLegacyChatStateIfNeeded()
+        invalidateRestoredMessage(sessionId = sessionId, messageId = message.id)
         database.withTransaction {
             chatHistoryDao.upsertMessage(
                 ChatMessageEntityMapper.toEntity(
@@ -163,6 +167,7 @@ class ChatRepository(
 
     suspend fun deleteSessionById(sessionId: String) {
         migrateLegacyChatStateIfNeeded()
+        invalidateRestoredSession(sessionId)
         database.withTransaction {
             chatHistoryDao.deleteSession(sessionId)
             val meta = chatHistoryDao.getMeta()
@@ -179,6 +184,7 @@ class ChatRepository(
     ) {
         require(fromPosition >= 0) { "fromPosition must be non-negative" }
         migrateLegacyChatStateIfNeeded()
+        invalidateRestoredMessagesFromPosition(sessionId = sessionId, fromPosition = fromPosition)
         database.withTransaction {
             replaceMessagesFromPositionInTransaction(sessionId, fromPosition, messages)
         }
@@ -209,6 +215,7 @@ class ChatRepository(
         migrationComplete: Boolean,
         writeIntent: PersistedChatWriteIntent = PersistedChatWriteIntent.SyncSnapshot,
     ) {
+        clearRestoredMessageCache()
         database.withTransaction {
             val safeCurrentSessionId = currentSessionId
                 .takeIf { id -> id == DraftSessionId || sessions.any { it.session.id == id } }
@@ -341,6 +348,49 @@ class ChatRepository(
             data.remove(SESSIONS_JSON)
             data.remove(CURRENT_SESSION_ID)
             data[ROOM_MIGRATION_COMPLETE] = true
+        }
+    }
+
+    private suspend fun clearRestoredMessageCache() {
+        restoredMessageCacheMutex.withLock {
+            restoredMessageCache.clear()
+        }
+    }
+
+    private suspend fun invalidateRestoredMessage(
+        sessionId: String,
+        messageId: String,
+    ) {
+        removeRestoredMessagesFromCache { cacheKey ->
+            cacheKey.sessionId == sessionId && cacheKey.id == messageId
+        }
+    }
+
+    private suspend fun invalidateRestoredSession(sessionId: String) {
+        removeRestoredMessagesFromCache { cacheKey ->
+            cacheKey.sessionId == sessionId
+        }
+    }
+
+    private suspend fun invalidateRestoredMessagesFromPosition(
+        sessionId: String,
+        fromPosition: Int,
+    ) {
+        removeRestoredMessagesFromCache { cacheKey ->
+            cacheKey.sessionId == sessionId && cacheKey.position >= fromPosition
+        }
+    }
+
+    private suspend fun removeRestoredMessagesFromCache(
+        shouldRemove: (ChatMessageCacheKey) -> Boolean,
+    ) {
+        restoredMessageCacheMutex.withLock {
+            val iterator = restoredMessageCache.keys.iterator()
+            while (iterator.hasNext()) {
+                if (shouldRemove(iterator.next())) {
+                    iterator.remove()
+                }
+            }
         }
     }
 
