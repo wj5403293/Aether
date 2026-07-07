@@ -1112,6 +1112,7 @@ class AetherViewModel(
         }
         if (didUpdate) {
             viewModelScope.launch {
+                chatStateStore.flush()
                 val sharedWorkspaceFilePaths = withContext(Dispatchers.IO) {
                     runCatching {
                         runtime.chatRepository.getUnreferencedWorkspaceFilePathsForDeletedSession(sessionId)
@@ -1377,6 +1378,7 @@ class AetherViewModel(
 
         if (didUpdate) {
             viewModelScope.launch {
+                chatStateStore.flush()
                 val sharedWorkspaceFilePaths = withContext(Dispatchers.IO) {
                     runCatching {
                         runtime.chatRepository.getUnreferencedWorkspaceFilePathsForDeletedMessages(
