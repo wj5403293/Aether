@@ -465,6 +465,98 @@ object LucideIcons {
             return _chartNoAxesColumn!!
         }
 
+    val Zap: ImageVector
+        get() {
+            if (_zap != null) return _zap!!
+
+            _zap = ImageVector.Builder(
+                name = "zap",
+                defaultWidth = 24.dp,
+                defaultHeight = 24.dp,
+                viewportWidth = 24f,
+                viewportHeight = 24f,
+            ).apply {
+                path(
+                    fill = SolidColor(Color.Transparent),
+                    stroke = SolidColor(Color(0xFF000000)),
+                    strokeLineWidth = 2f,
+                    strokeLineCap = StrokeCap.Round,
+                    strokeLineJoin = StrokeJoin.Round,
+                ) {
+                    moveTo(4f, 14f)
+                    arcToRelative(1f, 1f, 0f, false, true, -0.78f, -1.63f)
+                    lineToRelative(9.9f, -10.2f)
+                    arcToRelative(0.5f, 0.5f, 0f, false, true, 0.86f, 0.46f)
+                    lineToRelative(-1.92f, 6.02f)
+                    arcTo(1f, 1f, 0f, false, false, 13f, 10f)
+                    horizontalLineToRelative(7f)
+                    arcToRelative(1f, 1f, 0f, false, true, 0.78f, 1.63f)
+                    lineToRelative(-9.9f, 10.2f)
+                    arcToRelative(0.5f, 0.5f, 0f, false, true, -0.86f, -0.46f)
+                    lineToRelative(1.92f, -6.02f)
+                    arcTo(1f, 1f, 0f, false, false, 11f, 14f)
+                    close()
+                }
+            }.build()
+
+            return _zap!!
+        }
+
+    val Brain: ImageVector
+        get() {
+            if (_brain != null) return _brain!!
+
+            _brain = ImageVector.Builder(
+                name = "brain",
+                defaultWidth = 24.dp,
+                defaultHeight = 24.dp,
+                viewportWidth = 24f,
+                viewportHeight = 24f,
+            ).apply {
+                path(
+                    fill = SolidColor(Color.Transparent),
+                    stroke = SolidColor(Color(0xFF000000)),
+                    strokeLineWidth = 2f,
+                    strokeLineCap = StrokeCap.Round,
+                    strokeLineJoin = StrokeJoin.Round,
+                ) {
+                    moveTo(12f, 5f)
+                    arcToRelative(3f, 3f, 0f, true, false, -5.997f, 0.125f)
+                    arcToRelative(4f, 4f, 0f, false, false, -2.526f, 5.77f)
+                    arcToRelative(4f, 4f, 0f, false, false, 0.556f, 6.588f)
+                    arcTo(4f, 4f, 0f, true, false, 12f, 18f)
+                    close()
+                }
+                path(
+                    fill = SolidColor(Color.Transparent),
+                    stroke = SolidColor(Color(0xFF000000)),
+                    strokeLineWidth = 2f,
+                    strokeLineCap = StrokeCap.Round,
+                    strokeLineJoin = StrokeJoin.Round,
+                ) {
+                    moveTo(12f, 5f)
+                    arcToRelative(3f, 3f, 0f, true, true, 5.997f, 0.125f)
+                    arcToRelative(4f, 4f, 0f, false, true, 2.526f, 5.77f)
+                    arcToRelative(4f, 4f, 0f, false, true, -0.556f, 6.588f)
+                    arcTo(4f, 4f, 0f, true, true, 12f, 18f)
+                    close()
+                }
+                path(
+                    fill = SolidColor(Color.Transparent),
+                    stroke = SolidColor(Color(0xFF000000)),
+                    strokeLineWidth = 2f,
+                    strokeLineCap = StrokeCap.Round,
+                    strokeLineJoin = StrokeJoin.Round,
+                ) {
+                    moveTo(15f, 13f)
+                    arcToRelative(4.5f, 4.5f, 0f, false, false, -3f, -4f)
+                    arcToRelative(4.5f, 4.5f, 0f, false, false, -3f, 4f)
+                }
+            }.build()
+
+            return _brain!!
+        }
+
     private var _search: ImageVector? = null
     private var _settings: ImageVector? = null
     private var _squarePen: ImageVector? = null
@@ -475,4 +567,6 @@ object LucideIcons {
     private var _rotateCcw: ImageVector? = null
     private var _trash2: ImageVector? = null
     private var _chartNoAxesColumn: ImageVector? = null
+    private var _zap: ImageVector? = null
+    private var _brain: ImageVector? = null
 }

@@ -24,6 +24,7 @@ import com.zhousl.aether.data.InstalledSkill
 import com.zhousl.aether.data.LlmApiClient
 import com.zhousl.aether.data.LlmProvider
 import com.zhousl.aether.data.LlmProviderConfig
+import com.zhousl.aether.data.ModelCatalogClient
 import com.zhousl.aether.data.LocalRuntimeId
 import com.zhousl.aether.data.ProviderModelOption
 import com.zhousl.aether.data.PersistedChatWriteIntent
@@ -125,6 +126,7 @@ class AetherViewModel(
     private var didEvaluateStartupUpdateCheck = false
     private var lastTrackedTermuxDetectedIssue: TermuxSetupIssue? = null
     private var pendingTermuxSetupSource: String? = null
+    private var lastModelCatalogRequestKey: String = ""
     private val _uiState = MutableStateFlow(AetherUiState())
     private val _transientMessages = MutableSharedFlow<UiText>(extraBufferCapacity = 4)
     private var didEvaluateWorkspaceMode = false
@@ -280,6 +282,7 @@ class AetherViewModel(
         viewModelScope.launch {
             settingsRepository.providerConfigs.collect { configs ->
                 _uiState.update { current -> current.copy(providerConfigs = configs) }
+                refreshModelCatalogInfo(configs)
             }
         }
         viewModelScope.launch {
@@ -295,6 +298,23 @@ class AetherViewModel(
         viewModelScope.launch {
             agentModeController.authorizationState.collect { authorizationState ->
                 _uiState.update { current -> current.copy(agentModeAuthorizationState = authorizationState) }
+            }
+        }
+    }
+
+    private fun refreshModelCatalogInfo(configs: List<LlmProviderConfig>) {
+        val options = configs.availableModelOptions()
+        val requestKey = options.joinToString("|") { "${it.key}:${it.fullLabel}" }
+        if (requestKey == lastModelCatalogRequestKey) return
+        lastModelCatalogRequestKey = requestKey
+        if (options.isEmpty()) {
+            _uiState.update { current -> current.copy(modelCatalogInfo = emptyMap()) }
+            return
+        }
+        viewModelScope.launch {
+            val modelInfo = ModelCatalogClient.fetchModelInfo(options)
+            if (requestKey == lastModelCatalogRequestKey) {
+                _uiState.update { current -> current.copy(modelCatalogInfo = modelInfo) }
             }
         }
     }

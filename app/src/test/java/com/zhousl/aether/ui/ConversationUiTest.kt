@@ -6,6 +6,54 @@ import org.junit.Test
 
 class ConversationUiTest {
     @Test
+    fun selectedModelDisplaySplitsFamilyAndVariant() {
+        assertEquals(
+            SelectedModelDisplayName("GPT", "5.5"),
+            formatSelectedModelDisplayName("gpt-5.5"),
+        )
+        assertEquals(
+            SelectedModelDisplayName("Gemini", "3.1 Flash Lite"),
+            formatSelectedModelDisplayName("Gemini 3.1 Flash Lite Preview"),
+        )
+        assertEquals(
+            SelectedModelDisplayName("Qwen", "3.6 Max"),
+            formatSelectedModelDisplayName("qwen3.6-max-preview"),
+        )
+    }
+
+    @Test
+    fun selectedModelDisplayUsesCapabilityIcons() {
+        assertEquals(
+            SelectedModelDisplayName("GPT", "5.3 Codex", SelectedModelDisplayIcon.Fast),
+            formatSelectedModelDisplayName("gpt-5.3-codex-spark"),
+        )
+        assertEquals(
+            SelectedModelDisplayName("Mimo", "v2.5 Pro", SelectedModelDisplayIcon.Fast),
+            formatSelectedModelDisplayName("mimo-v2.5-pro-ultraspeed"),
+        )
+        assertEquals(
+            SelectedModelDisplayName("Nemotron", "3 Nano Omni", SelectedModelDisplayIcon.Reasoning),
+            formatSelectedModelDisplayName("nemotron-3-nano-omni-30b-a3b-reasoning"),
+        )
+    }
+
+    @Test
+    fun selectedModelDisplayKeepsSingleFamilyWhenNoVariantExists() {
+        assertEquals(
+            SelectedModelDisplayName("Fugu", ""),
+            formatSelectedModelDisplayName("fugu"),
+        )
+        assertEquals(
+            SelectedModelDisplayName("Fugu", "Ultra"),
+            formatSelectedModelDisplayName("fugu-ultra"),
+        )
+        assertEquals(
+            SelectedModelDisplayName("GLM", "5.1"),
+            formatSelectedModelDisplayName("GLM-5.1"),
+        )
+    }
+
+    @Test
     fun pendingIndicatorShowsThinkingAfterBodyTextResetsForToolCall() {
         val previousBlocks = listOf(
             AssistantResponseBlock.Text(

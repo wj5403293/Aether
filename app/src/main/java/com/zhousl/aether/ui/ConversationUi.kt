@@ -5,6 +5,7 @@ import android.graphics.SurfaceTexture
 import android.os.SystemClock
 import android.view.Surface
 import android.view.TextureView
+import androidx.compose.foundation.Canvas
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.CubicBezierEasing
@@ -104,11 +105,14 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.asComposePath
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -139,12 +143,14 @@ import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
+import androidx.core.graphics.PathParser
 import com.zhousl.aether.R
 import com.zhousl.aether.data.InstalledSkill
 import com.zhousl.aether.data.AppLanguage
 import com.zhousl.aether.data.AgentModeDisplayState
 import com.zhousl.aether.data.McpServerConfig
 import com.zhousl.aether.data.McpTransportConfig
+import com.zhousl.aether.data.ModelCatalogInfo
 import com.zhousl.aether.data.PendingSessionInput
 import com.zhousl.aether.data.ProviderModelOption
 import com.zhousl.aether.data.SessionExecutionState
@@ -167,6 +173,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
 import org.json.JSONObject
+import java.util.Locale
 
 private sealed interface ConversationListItem {
     val key: String
@@ -290,6 +297,7 @@ fun ConversationScreen(
     inputValue: String,
     draftAttachments: List<ChatAttachment>,
     modelOptions: List<ProviderModelOption>,
+    modelCatalogInfo: Map<String, ModelCatalogInfo>,
     selectedModelKey: String,
     availableSkills: List<InstalledSkill>,
     availableMcpServers: List<McpServerConfig>,
@@ -688,6 +696,7 @@ fun ConversationScreen(
                 modifier = Modifier.align(Alignment.TopCenter),
                 onBodyHeightChanged = { topBarBodyHeightPx = it },
                 modelOptions = modelOptions,
+                modelCatalogInfo = modelCatalogInfo,
                 selectedModelKey = selectedModelKey,
                 onMenu = onMenu,
                 onModelSelected = onModelSelected,
@@ -760,6 +769,7 @@ private fun ConversationTopOverlay(
     modifier: Modifier = Modifier,
     onBodyHeightChanged: (Int) -> Unit,
     modelOptions: List<ProviderModelOption>,
+    modelCatalogInfo: Map<String, ModelCatalogInfo>,
     selectedModelKey: String,
     onMenu: () -> Unit,
     onModelSelected: (String) -> Unit,
@@ -776,6 +786,7 @@ private fun ConversationTopOverlay(
         ) {
             ConversationTopBar(
                 modelOptions = modelOptions,
+                modelCatalogInfo = modelCatalogInfo,
                 selectedModelKey = selectedModelKey,
                 onMenu = onMenu,
                 onModelSelected = onModelSelected,
@@ -795,6 +806,7 @@ private fun ConversationTopOverlay(
 private fun ConversationTopBar(
     modifier: Modifier = Modifier,
     modelOptions: List<ProviderModelOption>,
+    modelCatalogInfo: Map<String, ModelCatalogInfo>,
     selectedModelKey: String,
     onMenu: () -> Unit,
     onModelSelected: (String) -> Unit,
@@ -811,11 +823,13 @@ private fun ConversationTopBar(
             icon = Icons.Rounded.Menu,
             contentDescription = stringResource(R.string.common_menu),
             onClick = onMenu,
-            size = 44.dp,
+            size = 38.dp,
+            iconSize = 19.dp,
             containerColor = AetherSurface.copy(alpha = 0.96f),
         )
         ConversationModelSelector(
             options = modelOptions,
+            modelCatalogInfo = modelCatalogInfo,
             selectedModelKey = selectedModelKey,
             onSelected = onModelSelected,
             modifier = Modifier
@@ -826,7 +840,8 @@ private fun ConversationTopBar(
             icon = LucideIcons.SquarePen,
             contentDescription = stringResource(R.string.common_new_chat),
             onClick = onNewChat,
-            size = 44.dp,
+            size = 38.dp,
+            iconSize = 19.dp,
             containerColor = AetherSurface.copy(alpha = 0.96f),
         )
     }
@@ -835,52 +850,69 @@ private fun ConversationTopBar(
 @Composable
 private fun ConversationModelSelector(
     options: List<ProviderModelOption>,
+    modelCatalogInfo: Map<String, ModelCatalogInfo>,
     selectedModelKey: String,
     onSelected: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var expanded by remember { mutableStateOf(false) }
-    var anchorBottomPx by remember { mutableIntStateOf(0) }
+    var anchorHeightPx by remember { mutableIntStateOf(0) }
     val menuVisibility = remember { MutableTransitionState(false) }
     menuVisibility.targetState = expanded
     val density = LocalDensity.current
-    val menuWidth = 276.dp
+    val menuWidth = 242.dp
     val selectedOption = options.firstOrNull { it.key == selectedModelKey } ?: options.firstOrNull()
     val fallbackLabel = stringResource(R.string.chat_select_model)
+    val selectedDisplay = remember(selectedOption, modelCatalogInfo) {
+        selectedOption?.let { option ->
+            formatSelectedModelDisplayName(
+                rawName = modelCatalogInfo[option.key]?.displayName ?: option.modelId,
+            )
+        }
+    }
 
     Box(
         modifier = modifier,
-        contentAlignment = Alignment.Center,
+        contentAlignment = Alignment.CenterStart,
     ) {
         Row(
             modifier = Modifier
                 .onGloballyPositioned { coordinates ->
-                    anchorBottomPx = coordinates.boundsInRoot().bottom.toInt()
+                    val bounds = coordinates.boundsInWindow()
+                    anchorHeightPx = bounds.height.toInt()
                 }
+                .height(38.dp)
+                .shadow(4.dp, RoundedCornerShape(999.dp), ambientColor = ChatGptControlShadow, spotColor = ChatGptControlShadow)
+                .clip(RoundedCornerShape(999.dp))
+                .background(AetherSurface.copy(alpha = 0.96f))
                 .clickable(enabled = options.isNotEmpty()) { expanded = true },
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text(
-                text = selectedOption?.chatLabel ?: fallbackLabel,
-                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
-                color = AetherOnSurface,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.widthIn(max = 180.dp),
-            )
-            Icon(
-                imageVector = Icons.Rounded.ArrowDropDown,
-                contentDescription = null,
-                tint = AetherOnSurfaceVariant,
-                modifier = Modifier.size(22.dp),
-            )
+            if (selectedDisplay != null) {
+                SelectedModelDisplay(
+                    displayName = selectedDisplay,
+                    modifier = Modifier
+                        .widthIn(max = 240.dp)
+                        .padding(horizontal = 17.dp),
+                )
+            } else {
+                Text(
+                    text = fallbackLabel,
+                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Normal),
+                    color = AetherOnSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .widthIn(max = 220.dp)
+                        .padding(horizontal = 17.dp),
+                )
+            }
         }
 
         if (menuVisibility.currentState || menuVisibility.targetState) {
             Popup(
-                alignment = Alignment.TopCenter,
-                offset = IntOffset(0, anchorBottomPx - with(density) { 32.dp.roundToPx() }),
+                alignment = Alignment.TopStart,
+                offset = IntOffset(0, anchorHeightPx + with(density) { 10.dp.roundToPx() }),
                 onDismissRequest = { expanded = false },
                 properties = PopupProperties(
                     focusable = true,
@@ -902,69 +934,243 @@ private fun ConversationModelSelector(
                     Column(
                         modifier = Modifier
                             .width(menuWidth)
-                            .shadow(20.dp, RoundedCornerShape(28.dp), ambientColor = AetherScrim, spotColor = AetherScrim)
-                            .clip(RoundedCornerShape(28.dp))
+                            .shadow(14.dp, RoundedCornerShape(22.dp), ambientColor = AetherScrim, spotColor = AetherScrim)
+                            .clip(RoundedCornerShape(22.dp))
                             .background(AetherSurface)
-                            .padding(vertical = 2.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
+                            .padding(vertical = 5.dp),
+                        horizontalAlignment = Alignment.Start,
                     ) {
                         Column(
                             modifier = Modifier
-                                .heightIn(max = 360.dp)
+                                .heightIn(max = 312.dp)
                                 .verticalScroll(rememberScrollState()),
-                            horizontalAlignment = Alignment.CenterHorizontally,
+                            horizontalAlignment = Alignment.Start,
                         ) {
-                            options.forEachIndexed { index, option ->
+                            options.forEach { option ->
                                 val isSelected = option.key == selectedOption?.key
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clip(RoundedCornerShape(20.dp))
-                                        .clickable {
-                                            expanded = false
-                                            onSelected(option.key)
-                                        }
-                                        .padding(horizontal = 18.dp, vertical = 15.dp),
-                                ) {
-                                    Text(
-                                        text = option.chatLabel,
-                                        style = MaterialTheme.typography.titleMedium.copy(
-                                            fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium,
-                                        ),
-                                        color = AetherOnSurface,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        textAlign = TextAlign.Center,
-                                        modifier = Modifier
-                                            .align(Alignment.Center)
-                                            .padding(horizontal = 24.dp),
-                                    )
-                                    if (isSelected) {
-                                        Icon(
-                                            imageVector = Icons.Rounded.Check,
-                                            contentDescription = null,
-                                            tint = AetherOnSurface,
-                                            modifier = Modifier
-                                                .align(Alignment.CenterEnd)
-                                                .size(22.dp),
-                                        )
-                                    }
-                                }
-                                if (index != options.lastIndex) {
-                                    Box(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(horizontal = 18.dp)
-                                            .height(1.dp)
-                                            .background(AetherOnSurfaceVariant.copy(alpha = 0.12f)),
-                                    )
-                                }
+                                ConversationModelMenuRow(
+                                    label = option.chatLabel,
+                                    catalogInfo = modelCatalogInfo[option.key],
+                                    selected = isSelected,
+                                    onClick = {
+                                        expanded = false
+                                        onSelected(option.key)
+                                    },
+                                )
                             }
                         }
                     }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun ConversationModelMenuRow(
+    label: String,
+    catalogInfo: ModelCatalogInfo?,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 5.dp, vertical = 1.dp)
+            .clip(RoundedCornerShape(15.dp))
+            .background(if (selected) AetherOnSurface.copy(alpha = 0.06f) else Color.Transparent)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 9.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(9.dp),
+    ) {
+        LabLogoBadge(
+            catalogInfo = catalogInfo,
+            modifier = Modifier.size(22.dp),
+        )
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Normal),
+            color = AetherOnSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.Start,
+            modifier = Modifier.weight(1f),
+        )
+        if (selected) {
+            Icon(
+                imageVector = Icons.Rounded.Check,
+                contentDescription = null,
+                tint = AetherOnSurfaceVariant,
+                modifier = Modifier.size(16.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun LabLogoBadge(
+    catalogInfo: ModelCatalogInfo?,
+    modifier: Modifier = Modifier,
+) {
+    val info = catalogInfo
+    val logoPaths = remember(catalogInfo) {
+        info?.toLabLogoPaths().orEmpty()
+    }
+    if (info != null && logoPaths.isNotEmpty()) {
+        Canvas(
+            modifier = modifier,
+        ) {
+            val scaleX = size.width / info.labLogoViewportWidth
+            val scaleY = size.height / info.labLogoViewportHeight
+            scale(scaleX = scaleX, scaleY = scaleY, pivot = Offset.Zero) {
+                logoPaths.forEach { path ->
+                    drawPath(path = path, color = labLogoTint())
+                }
+            }
+        }
+        return
+    }
+    Box(
+        modifier = modifier,
+    )
+}
+
+private fun ModelCatalogInfo.toLabLogoPaths(): List<Path> {
+    if (labLogoPathData.isEmpty()) return emptyList()
+    return labLogoPathData.mapNotNull { pathData ->
+        runCatching {
+            PathParser.createPathFromPathData(pathData).asComposePath()
+        }.getOrNull()
+    }
+}
+
+private fun labLogoTint(): Color = AetherOnSurface
+
+@Composable
+private fun SelectedModelDisplay(
+    displayName: SelectedModelDisplayName,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        Text(
+            text = displayName.primary,
+            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Normal),
+            color = AetherOnSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        if (displayName.secondary.isNotBlank()) {
+            Text(
+                text = displayName.secondary,
+                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Normal),
+                color = AetherOnSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false),
+            )
+        }
+        displayName.icon?.let { icon ->
+            Icon(
+                imageVector = when (icon) {
+                    SelectedModelDisplayIcon.Fast -> LucideIcons.Zap
+                    SelectedModelDisplayIcon.Reasoning -> LucideIcons.Brain
+                },
+                contentDescription = null,
+                tint = AetherOnSurfaceVariant,
+                modifier = Modifier.size(15.dp),
+            )
+        }
+    }
+}
+
+internal data class SelectedModelDisplayName(
+    val primary: String,
+    val secondary: String,
+    val icon: SelectedModelDisplayIcon? = null,
+)
+
+internal enum class SelectedModelDisplayIcon {
+    Fast,
+    Reasoning,
+}
+
+internal fun formatSelectedModelDisplayName(rawName: String): SelectedModelDisplayName {
+    val normalizedTokens = rawName
+        .trim()
+        .substringAfterLast('/')
+        .replace(Regex("[()]"), " ")
+        .split(Regex("[\\s_-]+"))
+        .mapNotNull { token ->
+            token.trim().takeIf { it.isNotEmpty() }
+        }
+    val icon = when {
+        normalizedTokens.any { it.equals("reasoning", ignoreCase = true) || it.equals("thinking", ignoreCase = true) } ->
+            SelectedModelDisplayIcon.Reasoning
+        normalizedTokens.any { token ->
+            token.equals("ultraspeed", ignoreCase = true) ||
+                token.equals("fast", ignoreCase = true) ||
+                token.equals("spark", ignoreCase = true) ||
+                token.equals("highspeed", ignoreCase = true)
+        } -> SelectedModelDisplayIcon.Fast
+        else -> null
+    }
+    val visibleTokens = normalizedTokens
+        .filterNot { token ->
+            token.equals("preview", ignoreCase = true) ||
+                token.equals("reasoning", ignoreCase = true) ||
+                token.equals("thinking", ignoreCase = true) ||
+                token.equals("ultraspeed", ignoreCase = true) ||
+                token.equals("fast", ignoreCase = true) ||
+                token.equals("spark", ignoreCase = true) ||
+                token.equals("highspeed", ignoreCase = true)
+        }
+        .let { tokens ->
+            val isLong = tokens.joinToString(" ").length > 28 || tokens.size > 4
+            if (!isLong) {
+                tokens
+            } else {
+                tokens.filterNot { token -> token.matches(Regex("\\d+b", RegexOption.IGNORE_CASE)) || token.matches(Regex("a\\d+b", RegexOption.IGNORE_CASE)) }
+            }
+        }
+    if (visibleTokens.isEmpty()) {
+        return SelectedModelDisplayName(primary = rawName.trim().ifBlank { "" }, secondary = "", icon = icon)
+    }
+    val splitFirst = splitTrailingNumber(visibleTokens.first())
+    val primary = titleModelToken(splitFirst.first)
+    val secondaryTokens = buildList {
+        splitFirst.second?.takeIf { it.isNotBlank() }?.let(::add)
+        addAll(visibleTokens.drop(1))
+    }
+    return SelectedModelDisplayName(
+        primary = primary,
+        secondary = secondaryTokens.joinToString(" ") { titleModelToken(it) },
+        icon = icon,
+    )
+}
+
+private fun splitTrailingNumber(token: String): Pair<String, String?> {
+    val match = Regex("^([A-Za-z]+)(\\d[\\w.]*)$").matchEntire(token) ?: return token to null
+    return match.groupValues[1] to match.groupValues[2]
+}
+
+private fun titleModelToken(token: String): String {
+    if (token.isBlank()) return token
+    val uppercaseToken = token.uppercase()
+    if (uppercaseToken == token && token.any(Char::isLetter)) return token
+    if (token.equals("gpt", ignoreCase = true) || token.equals("glm", ignoreCase = true)) {
+        return token.uppercase()
+    }
+    if (token.startsWith("v") && token.drop(1).firstOrNull()?.isDigit() == true) {
+        return "v" + token.drop(1)
+    }
+    if (token.first().isDigit()) return token
+    return token.replaceFirstChar { char ->
+        if (char.isLowerCase()) char.titlecase(Locale.getDefault()) else char.toString()
     }
 }
 

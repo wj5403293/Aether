@@ -252,6 +252,7 @@ data class AetherUiState(
     val mcpServers: List<McpServerConfig> = emptyList(),
     val scheduledTasks: List<ScheduledTask> = emptyList(),
     val providerConfigs: List<LlmProviderConfig> = emptyList(),
+    val modelCatalogInfo: Map<String, com.zhousl.aether.data.ModelCatalogInfo> = emptyMap(),
     val isFetchingModels: Boolean = false,
     val showStarterPromptHint: Boolean = false,
     val awaitingFollowUpTour: Boolean = false,

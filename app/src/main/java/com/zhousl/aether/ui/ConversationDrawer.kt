@@ -670,6 +670,7 @@ internal fun HeaderCircleButton(
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
     size: Dp = 44.dp,
+    iconSize: Dp = 22.dp,
     containerColor: Color = Color.White,
     iconTint: Color = AetherOnSurface,
 ) {
@@ -687,12 +688,14 @@ internal fun HeaderCircleButton(
                 painter = iconPainter,
                 contentDescription = contentDescription,
                 tint = if (enabled) iconTint else iconTint.copy(alpha = 0.4f),
+                modifier = Modifier.size(iconSize),
             )
 
             icon != null -> Icon(
                 imageVector = icon,
                 contentDescription = contentDescription,
                 tint = if (enabled) iconTint else iconTint.copy(alpha = 0.4f),
+                modifier = Modifier.size(iconSize),
             )
         }
     }

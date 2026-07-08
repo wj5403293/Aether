@@ -586,6 +586,7 @@ private fun AetherAppContent(
                     inputValue = uiState.draftInput,
                     draftAttachments = uiState.draftAttachments,
                     modelOptions = conversationModelOptions,
+                    modelCatalogInfo = uiState.modelCatalogInfo,
                     selectedModelKey = selectedConversationModelKey,
                     availableSkills = uiState.installedSkills.filter { it.isEnabled },
                     availableMcpServers = uiState.mcpServers.filter { it.isEnabled },
