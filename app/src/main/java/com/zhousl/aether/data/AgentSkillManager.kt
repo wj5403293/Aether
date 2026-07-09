@@ -475,6 +475,12 @@ class AgentSkillManager(
     private fun resolveRemoteDownloadPlan(rawUrl: String): RemoteDownloadPlan {
         val url = rawUrl.trim().ifBlank { error("A remote skill URL is required.") }
         val httpUrl = url.toHttpUrlOrNull() ?: error("Skill URL is not a valid absolute URL.")
+        if (httpUrl.encodedPath.lowercase(Locale.US).endsWith(".zip")) {
+            return RemoteDownloadPlan(
+                kind = SkillInstallKind.RemoteZip,
+                downloadUrl = httpUrl.toString(),
+            )
+        }
         if (httpUrl.host.equals("github.com", ignoreCase = true)) {
             val segments = httpUrl.pathSegments.filter { it.isNotBlank() }
             require(segments.size >= 2) { "GitHub URL must include owner and repository." }
@@ -495,7 +501,7 @@ class AgentSkillManager(
                 downloadUrl = "https://api.github.com/repos/$owner/$repository/zipball",
             )
         }
-        require(httpUrl.encodedPath.lowercase(Locale.US).endsWith(".zip")) {
+        require(isGitHubCodeloadZipUrl(httpUrl.host, httpUrl.pathSegments)) {
             "Remote skill URL must be a GitHub repository/tree URL or a direct .zip file."
         }
         return RemoteDownloadPlan(
@@ -503,6 +509,12 @@ class AgentSkillManager(
             downloadUrl = httpUrl.toString(),
         )
     }
+
+    private fun isGitHubCodeloadZipUrl(
+        host: String,
+        pathSegments: List<String>,
+    ): Boolean = host.equals("codeload.github.com", ignoreCase = true) &&
+        pathSegments.getOrNull(2)?.equals("zip", ignoreCase = true) == true
 
     private fun downloadZipIntoDirectory(
         url: String,
