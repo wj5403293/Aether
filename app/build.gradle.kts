@@ -39,6 +39,11 @@ val appVersionName = providers.gradleProperty("aether.versionName")
     ?.trim()
     ?.takeIf { it.isNotEmpty() }
     ?: "1.7.0"
+val piBridgeProjectDir = rootProject.layout.projectDirectory.dir("pi-bridge")
+val piBridgeGeneratedAssetsDir = layout.buildDirectory.dir("generated/assets/piBridge")
+
+fun npmExecutable(): String =
+    if (System.getProperty("os.name").lowercase().contains("windows")) "npm.cmd" else "npm"
 
 android {
     namespace = "com.zhousl.aether"
@@ -135,6 +140,7 @@ android {
     }
 
     sourceSets {
+        getByName("main").assets.srcDir(piBridgeGeneratedAssetsDir)
         getByName("androidTest").assets.srcDir("$projectDir/schemas")
     }
 }
@@ -207,4 +213,32 @@ tasks.withType<PostHogCliExecTask>().configureEach {
     if (posthogExecutable.isNotBlank()) {
         postHogExecutable.set(posthogExecutable)
     }
+}
+
+val installPiBridgeDependencies = tasks.register<Exec>("installPiBridgeDependencies") {
+    workingDir = piBridgeProjectDir.asFile
+    commandLine(npmExecutable(), "install", "--ignore-scripts")
+    inputs.file(piBridgeProjectDir.file("package.json"))
+    inputs.file(piBridgeProjectDir.file("package-lock.json"))
+    outputs.dir(piBridgeProjectDir.dir("node_modules"))
+}
+
+val buildPiBridge = tasks.register<Exec>("buildPiBridge") {
+    dependsOn(installPiBridgeDependencies)
+    workingDir = piBridgeProjectDir.asFile
+    commandLine(npmExecutable(), "run", "build")
+    inputs.file(piBridgeProjectDir.file("package.json"))
+    inputs.file(piBridgeProjectDir.file("tsconfig.json"))
+    inputs.dir(piBridgeProjectDir.dir("src"))
+    outputs.file(piBridgeProjectDir.file("dist/bridge.mjs"))
+}
+
+val copyPiBridgeAsset = tasks.register<Copy>("copyPiBridgeAsset") {
+    dependsOn(buildPiBridge)
+    from(piBridgeProjectDir.file("dist/bridge.mjs"))
+    into(piBridgeGeneratedAssetsDir.map { it.dir("pi-bridge") })
+}
+
+tasks.named("preBuild").configure {
+    dependsOn(copyPiBridgeAsset)
 }

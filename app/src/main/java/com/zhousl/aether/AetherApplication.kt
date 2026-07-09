@@ -22,6 +22,9 @@ import com.zhousl.aether.data.SessionExecutionManager
 import com.zhousl.aether.data.SettingsRepository
 import com.zhousl.aether.data.WebToolsClient
 import com.zhousl.aether.data.WorkspaceFileBridge
+import com.zhousl.aether.data.pi.PiCompletionClient
+import com.zhousl.aether.data.pi.PiAgentRunner
+import com.zhousl.aether.data.pi.PiKernelBridge
 import com.zhousl.aether.runtime.AlpineRuntime
 import com.zhousl.aether.runtime.RuntimeRouter
 import com.zhousl.aether.runtime.TermuxRuntime
@@ -104,6 +107,12 @@ class AetherAppRuntime(
         context = application,
         diagnosticLogger = diagnosticLogger,
     )
+    val piKernelBridge = PiKernelBridge(
+        alpineRuntime = alpineRuntime,
+        diagnosticLogger = diagnosticLogger,
+    )
+    val piCompletionClient = PiCompletionClient(piKernelBridge)
+    val piAgentRunner = PiAgentRunner(piKernelBridge)
     val runtimeRouter = RuntimeRouter(
         termuxRuntime = termuxRuntime,
         alpineRuntime = alpineRuntime,
@@ -160,6 +169,8 @@ class AetherAppRuntime(
         notificationController = notificationController,
         appForegroundTracker = appForegroundTracker,
         diagnosticLogger = diagnosticLogger,
+        piCompletionClient = piCompletionClient,
+        piAgentRunner = piAgentRunner,
     )
 
     fun initialize() {

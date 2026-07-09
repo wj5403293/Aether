@@ -126,6 +126,38 @@ class AlpineRuntime(
         )
     }
 
+    suspend fun installAsset(
+        assetPath: String,
+        guestPath: String,
+        executable: Boolean = false,
+    ): File = withContext(Dispatchers.IO) {
+        val setup = inspectSetup()
+        if (!setup.isReady) {
+            error(setup.detail.ifBlank { "Alpine runtime is not ready." })
+        }
+        val normalizedGuestPath = normalizePath(guestPath)
+        val target = guestPathToHostFile(normalizedGuestPath)
+        copyAsset(assetPath, target, executable)
+        target
+    }
+
+    suspend fun startManagedProcess(
+        command: String,
+        workingDirectory: String = homeDirectory,
+        redirectErrorStream: Boolean = false,
+    ): Process = withContext(Dispatchers.IO) {
+        val normalizedWorkingDirectory = normalizePath(workingDirectory)
+        val setup = inspectSetup()
+        if (!setup.isReady) {
+            error(setup.detail.ifBlank { "Alpine runtime is not ready." })
+        }
+        ensureWorkspace()
+        ensureGuestNetworkConfig()
+        buildAlpineProcess(command, normalizedWorkingDirectory)
+            .redirectErrorStream(redirectErrorStream)
+            .start()
+    }
+
     suspend fun installPackageProfile(profileId: String): LocalRuntimeSetupState {
         val packages = AlpinePackageProfiles[profileId]
             ?: return LocalRuntimeSetupState(
@@ -543,6 +575,17 @@ class AlpineRuntime(
         target.setReadable(true, true)
         target.setWritable(true, true)
         if (executable) target.setExecutable(true, true)
+    }
+
+    private fun guestPathToHostFile(guestPath: String): File {
+        val relativePath = guestPath.trim().trimStart('/')
+        require(relativePath.isNotBlank()) { "Guest path must not be blank." }
+        val target = File(rootfsDir, relativePath).canonicalFile
+        val canonicalRoot = rootfsDir.canonicalFile
+        require(target.path == canonicalRoot.path || target.path.startsWith(canonicalRoot.path + File.separator)) {
+            "Refusing to write outside Alpine rootfs: $guestPath"
+        }
+        return target
     }
 
     private fun extractTarGz(

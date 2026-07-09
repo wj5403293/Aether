@@ -1,0 +1,24 @@
+{
+  "name": "@aether/pi-bridge",
+  "version": "2.0.0-alpha.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "build": "esbuild src/bridge.ts --bundle --platform=node --format=esm --target=node22.19 --outfile=dist/bridge.mjs",
+    "check": "tsc --noEmit",
+    "test:ping": "node dist/bridge.mjs --ping"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "0.80.3",
+    "@earendil-works/pi-ai": "0.80.3",
+    "typebox": "1.1.38"
+  },
+  "devDependencies": {
+    "@types/node": "24.12.4",
+    "esbuild": "0.27.2",
+    "typescript": "5.9.3"
+  }
+}

@@ -58,6 +58,9 @@ import com.zhousl.aether.data.serializeChatSessions
 import com.zhousl.aether.data.serializeMcpServerConfigs
 import com.zhousl.aether.data.serializeProviderConfigs
 import com.zhousl.aether.data.toJson
+import com.zhousl.aether.data.LlmMessage
+import com.zhousl.aether.data.LlmTextPart
+import com.zhousl.aether.data.pi.PiCompletionClient
 import com.zhousl.aether.data.isProviderSetupValid
 import com.zhousl.aether.data.isNightlyUpdateNewer
 import com.zhousl.aether.data.isVersionNewer
@@ -114,6 +117,7 @@ class AetherViewModel(
     private val extensionsRepository = runtime.extensionsRepository
     private val sessionExecutionManager = runtime.sessionExecutionManager
     private val client = OpenAiCompatibleClient(diagnosticLogger = diagnosticLogger)
+    private val piCompletionClient: PiCompletionClient = runtime.piCompletionClient
     private val bashTool = runtime.bashTool
     private val rootSetupController = runtime.rootSetupController
     private val workspaceFileBridge = runtime.workspaceFileBridge
@@ -3430,15 +3434,30 @@ class AetherViewModel(
                 preferredModelKey = resolveDefaultTitleModelKey(settings, providerConfigs),
                 fallbackModelKey = resolveDefaultChatModelKey(settings, providerConfigs),
             )
-            val titleResult = client.createChatCompletion(
+            val title = piCompletionClient.completeOnce(
                 settings = titleSettings,
                 systemPrompt = SessionTitleSystemPrompt,
-                conversation = listOf(buildProviderUserMessage(titleSettings, titleInput)),
-            )
-            val title = titleResult.getOrNull()
+                messages = listOf(
+                    LlmMessage(
+                        role = "user",
+                        contentParts = listOf(LlmTextPart(titleInput)),
+                    )
+                ),
+                disableReasoning = true,
+            ).getOrNull()
                 ?.assistantText
                 ?.sanitizeGeneratedSessionTitle()
                 .orEmpty()
+                .ifBlank {
+                    client.createChatCompletion(
+                        settings = titleSettings,
+                        systemPrompt = SessionTitleSystemPrompt,
+                        conversation = listOf(buildProviderUserMessage(titleSettings, titleInput)),
+                    ).getOrNull()
+                        ?.assistantText
+                        ?.sanitizeGeneratedSessionTitle()
+                        .orEmpty()
+                }
 
             if (title.isBlank()) return@launch
 
@@ -3610,16 +3629,34 @@ class AetherViewModel(
             }
         }
 
-        val result = client.createChatCompletion(
+        val piResult = piCompletionClient.completeOnce(
             settings = settings,
             systemPrompt = SessionCompactingSystemPrompt,
-            conversation = listOf(buildProviderUserMessage(settings, compactInput)),
+            messages = listOf(
+                LlmMessage(
+                    role = "user",
+                    contentParts = listOf(LlmTextPart(compactInput)),
+                )
+            ),
             disableReasoning = true,
         )
-        val summary = result.getOrNull()?.assistantText?.trim().orEmpty()
+        val fallbackResult = if (piResult.getOrNull()?.assistantText?.trim().isNullOrBlank()) {
+            client.createChatCompletion(
+                settings = settings,
+                systemPrompt = SessionCompactingSystemPrompt,
+                conversation = listOf(buildProviderUserMessage(settings, compactInput)),
+                disableReasoning = true,
+            )
+        } else {
+            null
+        }
+        val summary = piResult.getOrNull()?.assistantText?.trim().orEmpty()
+            .ifBlank { fallbackResult?.getOrNull()?.assistantText?.trim().orEmpty() }
         if (summary.isBlank()) {
             return Result.failure(
-                result.exceptionOrNull() ?: IllegalStateException("empty model response")
+                piResult.exceptionOrNull()
+                    ?: fallbackResult?.exceptionOrNull()
+                    ?: IllegalStateException("empty model response")
             )
         }
         return Result.success(CompactedConversation(summary = summary))

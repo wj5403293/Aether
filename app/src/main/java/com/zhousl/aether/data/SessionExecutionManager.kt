@@ -7,6 +7,8 @@ import com.zhousl.aether.AetherNotificationController
 import com.zhousl.aether.AppForegroundTracker
 import com.zhousl.aether.runtime.RuntimeRouter
 import com.zhousl.aether.runtime.RuntimeShellTool
+import com.zhousl.aether.data.pi.PiAgentRunner
+import com.zhousl.aether.data.pi.PiCompletionClient
 import com.zhousl.aether.termux.TermuxBashTool
 import com.zhousl.aether.ui.AttachmentKind
 import com.zhousl.aether.ui.AssistantResponseBlock
@@ -127,6 +129,9 @@ class SessionExecutionManager(
     private val notificationController: AetherNotificationController,
     private val appForegroundTracker: AppForegroundTracker,
     private val diagnosticLogger: AetherDiagnosticLogger = AetherDiagnosticLogger.NoOp,
+    private val piCompletionClient: PiCompletionClient? = null,
+    @Suppress("unused")
+    private val piAgentRunner: PiAgentRunner? = null,
 ) {
     private val currentSettings = MutableStateFlow(AppSettings())
     private val currentProviderConfigs = MutableStateFlow<List<LlmProviderConfig>>(emptyList())
@@ -2040,12 +2045,24 @@ class SessionExecutionManager(
             appendLine("Reasoning excerpt:")
             append(rawText.take(ReasoningSummaryMaxInputChars))
         }
-        val result = OpenAiCompatibleClient().createChatCompletion(
+        val result = piCompletionClient?.completeOnce(
             settings = titleSettings,
             systemPrompt = ReasoningSummarySystemPrompt,
-            conversation = listOf(buildProviderUserMessage(titleSettings, prompt)),
+            messages = listOf(
+                LlmMessage(
+                    role = "user",
+                    contentParts = listOf(LlmTextPart(prompt)),
+                )
+            ),
             disableReasoning = true,
-        ).getOrNull()?.assistantText.orEmpty().trim()
+        )?.getOrNull()?.assistantText?.trim().orEmpty().ifBlank {
+            OpenAiCompatibleClient().createChatCompletion(
+                settings = titleSettings,
+                systemPrompt = ReasoningSummarySystemPrompt,
+                conversation = listOf(buildProviderUserMessage(titleSettings, prompt)),
+                disableReasoning = true,
+            ).getOrNull()?.assistantText.orEmpty().trim()
+        }
         return parseReasoningSummary(result)
     }
 
