@@ -18,7 +18,18 @@ class BridgeClient {
     this.eventWaiters = [];
     this.stderr = "";
     createInterface({ input: this.child.stdout }).on("line", (line) => {
-      const frame = JSON.parse(line);
+      let frame;
+      try {
+        frame = JSON.parse(line);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.failHarness(
+          new Error(
+            `Pi bridge emitted non-JSON stdout: ${message}${this.stderr ? `\nstderr: ${this.stderr}` : ""}`,
+          ),
+        );
+        return;
+      }
       if (frame.type === "event") {
         this.events.push(frame);
         const remaining = [];
@@ -50,6 +61,19 @@ class BridgeClient {
     activeClients.add(this);
   }
 
+  failHarness(error) {
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timeout);
+      pending.reject(error);
+    }
+    this.pending.clear();
+    for (const waiter of this.eventWaiters) {
+      clearTimeout(waiter.timeout);
+      waiter.reject(error);
+    }
+    this.eventWaiters = [];
+  }
+
   request(id, type, payload = {}, timeoutMs = 10_000) {
     this.child.stdin.write(`${JSON.stringify({ id, type, payload })}\n`);
     return new Promise((resolve, reject) => {
@@ -68,6 +92,7 @@ class BridgeClient {
       const waiter = {
         predicate,
         resolve,
+        reject,
         timeout: setTimeout(() => {
           this.eventWaiters = this.eventWaiters.filter((candidate) => candidate !== waiter);
           reject(new Error(`Timed out waiting for Pi event: ${this.stderr}`));
