@@ -7,10 +7,11 @@ import { afterEach, test } from "node:test";
 const activeClients = new Set();
 
 class BridgeClient {
-  constructor() {
+  constructor(environment = {}) {
     this.child = spawn(process.execPath, ["dist/bridge.mjs"], {
       cwd: process.cwd(),
       stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env, ...environment },
     });
     this.pending = new Map();
     this.events = [];
@@ -198,6 +199,93 @@ test("runs text turns and reuses the persisted Pi assistant session", async () =
   assert.equal(second.assistant_text, "first answer");
 });
 
+test("rebuilds a harness when any earlier persisted history changes", async () => {
+  const client = new BridgeClient();
+  const config = fauxConfig({ faux_response: "history answer" });
+  const first = await client.request(
+    "history-1",
+    "run_turn",
+    turnPayload("session-history-signature", [userMessage("ORIGINAL HISTORY")], config),
+  );
+
+  const second = await client.request(
+    "history-2",
+    "run_turn",
+    turnPayload(
+      "session-history-signature",
+      [
+        userMessage("REPLACED HISTORY"),
+        {
+          role: "assistant",
+          content: [{ type: "text", text: first.assistant_text }],
+          provider_payload: {
+            piAssistantMessage: first.assistant_message,
+            provider: first.provider,
+            model: first.model,
+          },
+        },
+        userMessage("continue"),
+      ],
+      config,
+    ),
+  );
+
+  assert.equal(second.session_reused, false);
+});
+
+test("closes harness sessions explicitly", async () => {
+  const client = new BridgeClient();
+  await client.request(
+    "close-create",
+    "run_turn",
+    turnPayload("session-close", [userMessage("hello")]),
+  );
+
+  const closed = await client.request("close-session", "close_session", {
+    session_id: "session-close",
+  });
+  assert.equal(closed.closed, true);
+  await assert.rejects(
+    client.request("close-follow-up", "follow_up", {
+      session_id: "session-close",
+      message: userMessage("still there?"),
+    }),
+    /Unknown Pi session/,
+  );
+});
+
+test("evicts least-recently-used idle harness sessions", async () => {
+  const client = new BridgeClient({ AETHER_PI_MAX_HARNESS_SESSIONS: "2" });
+  await client.request("lru-a", "run_turn", turnPayload("session-lru-a", [userMessage("a")]));
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  await client.request("lru-b", "run_turn", turnPayload("session-lru-b", [userMessage("b")]));
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  await client.request("lru-c", "run_turn", turnPayload("session-lru-c", [userMessage("c")]));
+
+  await assert.rejects(
+    client.request("lru-a-follow-up", "follow_up", {
+      session_id: "session-lru-a",
+      message: userMessage("again"),
+    }),
+    /Unknown Pi session/,
+  );
+});
+
+test("expires idle harness sessions after the configured TTL", async () => {
+  const client = new BridgeClient({ AETHER_PI_HARNESS_SESSION_TTL_MS: "20" });
+  await client.request("ttl-a", "run_turn", turnPayload("session-ttl-a", [userMessage("a")]));
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  await client.request("ttl-b", "run_turn", turnPayload("session-ttl-b", [userMessage("b")]));
+
+  await assert.rejects(
+    client.request("ttl-a-follow-up", "follow_up", {
+      session_id: "session-ttl-a",
+      message: userMessage("again"),
+    }),
+    /Unknown Pi session/,
+  );
+});
+
 test("rebuilds a persisted harness when the host tool set changes", async () => {
   const client = new BridgeClient();
   const config = fauxConfig({ faux_response: "first answer" });
@@ -320,6 +408,8 @@ test("runs parallel host tools concurrently", async () => {
         frame.payload.tool_name === "parallel_b",
     ),
   ]);
+  assert.equal(first.payload.execution_mode, "parallel");
+  assert.equal(second.payload.execution_mode, "parallel");
   await Promise.all([
     respondToHostTool(client, first, "parallel-result-a"),
     respondToHostTool(client, second, "parallel-result-b"),
@@ -355,6 +445,7 @@ test("runs sequential host tools one at a time", async () => {
       frame.event === "host_tool_request" &&
       frame.payload.tool_name === "sequential_a",
   );
+  assert.equal(first.payload.execution_mode, "sequential");
   await assert.rejects(
     client.waitForEvent(
       (frame) =>

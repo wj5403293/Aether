@@ -50,6 +50,8 @@ const PI_AI_VERSION = "0.80.3";
 const PI_AGENT_CORE_VERSION = "0.80.3";
 const AETHER_MANUAL_OAUTH_CALLBACK_HOST = "203.0.113.1";
 const OAUTH_FETCH_MAX_ATTEMPTS = 3;
+const DEFAULT_HARNESS_SESSION_LIMIT = 8;
+const DEFAULT_HARNESS_SESSION_TTL_MS = 30 * 60 * 1000;
 
 type JsonObject = Record<string, unknown>;
 
@@ -111,6 +113,7 @@ interface HarnessSessionState {
   systemPrompt: string;
   currentRequestId: string;
   toolArgsById: Map<string, unknown>;
+  lastAccessedAt: number;
 }
 
 const activeAborters = new Map<string, () => void | Promise<unknown>>();
@@ -144,6 +147,20 @@ const builtinProviderById = new Map(
 let defaultModelConfig: ModelConfig | undefined;
 let hostToolCounter = 0;
 let authPromptCounter = 0;
+
+function positiveIntegerEnvironmentValue(name: string, fallback: number): number {
+  const parsed = Number.parseInt(process.env[name] ?? "", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+const harnessSessionLimit = positiveIntegerEnvironmentValue(
+  "AETHER_PI_MAX_HARNESS_SESSIONS",
+  DEFAULT_HARNESS_SESSION_LIMIT,
+);
+const harnessSessionTtlMs = positiveIntegerEnvironmentValue(
+  "AETHER_PI_HARNESS_SESSION_TTL_MS",
+  DEFAULT_HARNESS_SESSION_TTL_MS,
+);
 
 function bundledOAuthAuth(providerId: string): OAuthAuth | undefined {
   const provider = getOAuthProvider(providerId);
@@ -935,7 +952,10 @@ function resolveHostToolResult(payload: JsonObject): boolean {
   const systemPrompt = asString(payload.system_prompt);
   if (sessionId && systemPrompt) {
     const state = harnessSessions.get(sessionId);
-    if (state) state.systemPrompt = systemPrompt;
+    if (state) {
+      state.systemPrompt = systemPrompt;
+      state.lastAccessedAt = Date.now();
+    }
   }
   const toolRequestId = asString(payload.tool_request_id).trim();
   const pending = toolRequestId ? pendingHostToolRequests.get(toolRequestId) : undefined;
@@ -960,6 +980,7 @@ function requestHostTool(
   toolName: string,
   toolCallId: string,
   params: JsonObject,
+  executionMode: "sequential" | "parallel",
   signal?: AbortSignal,
   onUpdate?: (partialResult: AgentToolResult<JsonObject>) => void,
 ): Promise<AgentToolResult<JsonObject>> {
@@ -972,6 +993,7 @@ function requestHostTool(
     tool_name: toolName,
     arguments: params,
     arguments_json: argumentsJson,
+    execution_mode: executionMode,
   });
   return new Promise<AgentToolResult<JsonObject>>((resolve, reject) => {
     if (signal?.aborted) {
@@ -1022,6 +1044,7 @@ function createHostTool(state: HarnessSessionState, definition: HostToolDefiniti
         definition.name,
         toolCallId,
         normalizeToolArguments(params),
+        definition.execution_mode ?? "parallel",
         signal,
         onUpdate,
       );
@@ -1135,17 +1158,29 @@ function hostToolSignature(rawTools: unknown): string {
   return JSON.stringify(normalizeHostToolDefinitions(rawTools));
 }
 
-function assistantSignature(message: AssistantMessage | undefined): string {
-  if (!message) return "";
-  if (message.responseId) {
-    return `${message.provider}|${message.model}|${message.responseId}`;
-  }
-  return JSON.stringify({
-    provider: message.provider,
-    model: message.model,
-    content: message.content,
-    stopReason: message.stopReason,
-  });
+function stableJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stableJsonValue);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value as JsonObject)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => [key, stableJsonValue(entry)]),
+  );
+}
+
+function historySignature(messages: AgentMessage[]): string {
+  return JSON.stringify(
+    stableJsonValue(
+      messages.map((message) => {
+        const normalized = { ...(message as unknown as JsonObject) };
+        delete normalized.timestamp;
+        if (normalized.role === "user" && typeof normalized.content === "string") {
+          normalized.content = [{ type: "text", text: normalized.content }];
+        }
+        return normalized;
+      }),
+    ),
+  );
 }
 
 function latestAssistantMessage(messages: AgentMessage[]): AssistantMessage | undefined {
@@ -1166,11 +1201,56 @@ async function canReuseHarnessSession(
   if (state.configSignature !== modelConfigSignature(config)) return false;
   if (state.toolSignature !== toolSignature) return false;
   if (state.workspaceDirectory !== workspaceDirectory) return false;
-  const persistedAssistant = latestAssistantMessage(history);
   const inMemoryContext = await state.session.buildContext();
-  const inMemoryAssistant = latestAssistantMessage(inMemoryContext.messages);
-  if (!persistedAssistant && !inMemoryAssistant) return true;
-  return assistantSignature(persistedAssistant) === assistantSignature(inMemoryAssistant);
+  return historySignature(history) === historySignature(inMemoryContext.messages);
+}
+
+function rejectPendingHostToolsForSession(sessionId: string, message: string): void {
+  for (const [toolRequestId, pending] of pendingHostToolRequests) {
+    if (pending.sessionId !== sessionId) continue;
+    clearTimeout(pending.timeout);
+    pending.reject(new Error(message));
+    pendingHostToolRequests.delete(toolRequestId);
+  }
+}
+
+async function closeHarnessSession(
+  sessionId: string,
+  expectedState?: HarnessSessionState,
+): Promise<boolean> {
+  const state = harnessSessions.get(sessionId);
+  if (!state || (expectedState && state !== expectedState)) return false;
+  harnessSessions.delete(sessionId);
+  rejectPendingHostToolsForSession(sessionId, "Host tool execution ended with the Pi session.");
+  await state.harness.abort().catch((error) => {
+    stderr.write(
+      `pi-bridge session close failed: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+  });
+  return true;
+}
+
+async function pruneHarnessSessions(protectedSessionId = ""): Promise<void> {
+  const now = Date.now();
+  const expired = [...harnessSessions.values()]
+    .filter(
+      (state) =>
+        state.sessionId !== protectedSessionId &&
+        !state.currentRequestId &&
+        now - state.lastAccessedAt >= harnessSessionTtlMs,
+    )
+    .sort((left, right) => left.lastAccessedAt - right.lastAccessedAt);
+  for (const state of expired) {
+    await closeHarnessSession(state.sessionId, state);
+  }
+
+  while (harnessSessions.size > harnessSessionLimit) {
+    const candidate = [...harnessSessions.values()]
+      .filter((state) => state.sessionId !== protectedSessionId && !state.currentRequestId)
+      .sort((left, right) => left.lastAccessedAt - right.lastAccessedAt)[0];
+    if (!candidate) return;
+    await closeHarnessSession(candidate.sessionId, candidate);
+  }
 }
 
 async function createHarnessSession(
@@ -1199,6 +1279,7 @@ async function createHarnessSession(
     systemPrompt: asString(payload.system_prompt),
     currentRequestId: "",
     toolArgsById: new Map<string, unknown>(),
+    lastAccessedAt: Date.now(),
   } satisfies HarnessSessionState;
   const tools = normalizeHostToolDefinitions(payload.host_tools).map((tool) => createHostTool(state, tool));
   const harness = new AgentHarness({
@@ -1226,6 +1307,7 @@ async function prepareHarnessSession(
   payload: JsonObject,
   history: AgentMessage[],
 ): Promise<{ state: HarnessSessionState; reused: boolean }> {
+  await pruneHarnessSessions();
   const config = normalizeModelConfig(payload.model_config ?? defaultModelConfig);
   const sessionId = asString(payload.session_id).trim();
   if (!sessionId) throw new Error("session_id is required for Pi harness sessions.");
@@ -1236,14 +1318,17 @@ async function prepareHarnessSession(
     ? await canReuseHarnessSession(existing, config, toolSignature, workspaceDirectory, history)
     : false;
   if (!existing || !reused) {
-    if (existing) await existing.harness.abort();
+    if (existing) await closeHarnessSession(sessionId, existing);
+    const state = await createHarnessSession(sessionId, payload, config, history);
+    await pruneHarnessSessions(sessionId);
     return {
-      state: await createHarnessSession(sessionId, payload, config, history),
+      state,
       reused: false,
     };
   }
 
   const reusable = existing;
+  reusable.lastAccessedAt = Date.now();
   reusable.systemPrompt = asString(payload.system_prompt);
   await reusable.harness.setThinkingLevel(thinkingLevelFor(payload) ?? "off");
   await reusable.harness.setStreamOptions(harnessStreamOptions(payload, config));
@@ -1258,6 +1343,7 @@ async function runHarnessPrompt(
   text: string,
   images: ImageContent[],
 ): Promise<AssistantMessage> {
+  state.lastAccessedAt = Date.now();
   state.currentRequestId = id;
   activeAborters.set(id, () => state.harness.abort());
   try {
@@ -1267,6 +1353,7 @@ async function runHarnessPrompt(
   } finally {
     activeAborters.delete(id);
     if (state.currentRequestId === id) state.currentRequestId = "";
+    state.lastAccessedAt = Date.now();
   }
 }
 
@@ -1309,9 +1396,11 @@ async function lastSessionAssistant(state: HarnessSessionState): Promise<Assista
 }
 
 async function steerHarnessSession(payload: JsonObject): Promise<JsonObject> {
+  await pruneHarnessSessions();
   const sessionId = asString(payload.session_id).trim();
   const state = harnessSessions.get(sessionId);
   if (!state || !state.currentRequestId) return { accepted: false };
+  state.lastAccessedAt = Date.now();
   const prompt = bridgePrompt(payload.message);
   try {
     await state.harness.steer(prompt.text, prompt.images.length > 0 ? { images: prompt.images } : undefined);
@@ -1322,9 +1411,11 @@ async function steerHarnessSession(payload: JsonObject): Promise<JsonObject> {
 }
 
 async function followUpHarnessSession(id: string, payload: JsonObject): Promise<JsonObject> {
+  await pruneHarnessSessions();
   const sessionId = asString(payload.session_id).trim();
   const state = harnessSessions.get(sessionId);
   if (!state) throw new Error(`Unknown Pi session: ${sessionId}`);
+  state.lastAccessedAt = Date.now();
   const prompt = bridgePrompt(payload.message);
   if (state.currentRequestId) {
     await state.harness.followUp(prompt.text, prompt.images.length > 0 ? { images: prompt.images } : undefined);
@@ -1510,6 +1601,12 @@ async function startHarnessSession(payload: JsonObject): Promise<JsonObject> {
   };
 }
 
+async function closeHarnessSessionRequest(payload: JsonObject): Promise<JsonObject> {
+  const sessionId = asString(payload.session_id).trim();
+  if (!sessionId) throw new Error("session_id is required to close a Pi harness session.");
+  return { closed: await closeHarnessSession(sessionId) };
+}
+
 async function abortBridgeTarget(payload: JsonObject): Promise<JsonObject> {
   const targetId = asString(payload.request_id, asString(payload.target_id)).trim();
   const sessionId = asString(payload.session_id).trim();
@@ -1575,6 +1672,9 @@ async function handleRequest(request: BridgeRequest): Promise<void> {
       return;
     case "start_session":
       writeResponse(id, await startHarnessSession(payload));
+      return;
+    case "close_session":
+      writeResponse(id, await closeHarnessSessionRequest(payload));
       return;
     case "steer":
       writeResponse(id, await steerHarnessSession(payload));
