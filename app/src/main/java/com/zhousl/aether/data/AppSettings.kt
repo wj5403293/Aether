@@ -2,46 +2,8 @@ package com.zhousl.aether.data
 
 import org.json.JSONArray
 import org.json.JSONObject
-import java.net.URI
 import java.util.Locale
 import java.util.UUID
-
-enum class LlmProvider(
-    val storageValue: String,
-    val displayName: String,
-    val defaultBaseUrl: String,
-    val defaultModelId: String,
-) {
-    OpenAiResponses(
-        storageValue = "openai_responses",
-        displayName = "OpenAI (Responses)",
-        defaultBaseUrl = "https://api.openai.com/v1",
-        defaultModelId = "gpt-5.4",
-    ),
-    OpenAiCompatible(
-        storageValue = "openai_compatible",
-        displayName = "OpenAI (Chat Completions)",
-        defaultBaseUrl = "https://api.openai.com/v1",
-        defaultModelId = "gpt-5.4",
-    ),
-    VertexExpress(
-        storageValue = "vertex_express",
-        displayName = "Vertex AI / Agent Platform",
-        defaultBaseUrl = "https://aiplatform.googleapis.com/v1",
-        defaultModelId = "gemini-2.5-flash",
-    ),
-    AnthropicMessages(
-        storageValue = "anthropic_messages",
-        displayName = "Anthropic Messages API",
-        defaultBaseUrl = "https://api.anthropic.com/v1",
-        defaultModelId = "claude-sonnet-4-5",
-    );
-
-    companion object {
-        fun fromStorage(value: String?): LlmProvider =
-            entries.firstOrNull { it.storageValue == value } ?: OpenAiCompatible
-    }
-}
 
 enum class AgentModeAuthorizationMethod(
     val storageValue: String,
@@ -150,10 +112,14 @@ data class AlpineEnvironmentVariable(
 )
 
 data class AppSettings(
-    val provider: LlmProvider = LlmProvider.OpenAiCompatible,
+    val piProviderId: String = DefaultPiProviderId,
+    val providerConfigId: String = "",
+    val providerAuthMethod: ProviderAuthMethod = ProviderAuthMethod.ApiKey,
     val apiKey: String = "",
-    val baseUrl: String = LlmProvider.OpenAiCompatible.defaultBaseUrl,
-    val modelId: String = LlmProvider.OpenAiCompatible.defaultModelId,
+    val oauthCredentialJson: String = "",
+    val providerEnvironmentVariables: List<PiProviderEnvironmentVariable> = emptyList(),
+    val baseUrl: String = DefaultCustomProviderBaseUrl,
+    val modelId: String = DefaultCustomModelId,
     val customHeaders: List<LlmCustomHeader> = emptyList(),
     val systemPrompt: String = "You are Aether, a local-first Android agent that can call tools and complete tasks on-device. Use available tools instead of guessing local state.",
     val tavilyApiKey: String = "",
@@ -181,8 +147,6 @@ data class AppSettings(
     val defaultTitleModelKey: String = "",
     val defaultNamingModelKey: String = "",
     val defaultCompactingModelKey: String = "",
-    val unsupportedParallelToolCallProviderKeys: List<String> = emptyList(),
-    val basicFunctionCallingCompatibilityMode: Boolean = false,
     val onboardingSeenVersion: Int = 0,
     val onboardingCompletedVersion: Int = 0,
     val privacyPolicyAccepted: Boolean = false,
@@ -250,74 +214,21 @@ fun AppSettings.isOnboardingComplete(
     onboardingVersion: Int = CurrentOnboardingVersion,
 ): Boolean = onboardingCompletedVersion >= onboardingVersion
 
-fun AppSettings.parallelToolCallSupportKey(): String {
-    val normalizedBaseUrl = runCatching {
-        val uri = URI(baseUrl.trim())
-        val scheme = uri.scheme?.lowercase(Locale.US).orEmpty()
-        val host = uri.host?.lowercase(Locale.US).orEmpty()
-        val port = if (uri.port >= 0) ":${uri.port}" else ""
-        val path = uri.path.orEmpty().trimEnd('/')
-        "$scheme://$host$port$path"
-    }.getOrDefault(baseUrl.trim().trimEnd('/').lowercase(Locale.US))
-    return listOf(
-        provider.storageValue,
-        normalizedBaseUrl,
-        modelId.trim().lowercase(Locale.US),
-    ).joinToString("|")
-}
+fun AppSettings.isProviderSetupValid(): Boolean {
+    val definition = PiProviderCatalog.resolve(piProviderId)
+    if ((definition.requiresBaseUrl || !definition.isBuiltIn) && baseUrl.trim().isEmpty()) return false
+    return when (providerAuthMethod) {
+        ProviderAuthMethod.ApiKey ->
+            !definition.supportsApiKey ||
+                apiKey.isNotBlank() ||
+                !definition.isBuiltIn
 
-fun AppSettings.supportsParallelToolCalls(): Boolean =
-    !basicFunctionCallingCompatibilityMode &&
-        modelCapabilities().supportsParallelToolCalls &&
-        parallelToolCallSupportKey() !in unsupportedParallelToolCallProviderKeys
+        ProviderAuthMethod.OAuth ->
+            definition.supportsOAuth && oauthCredentialJson.isNotBlank()
 
-fun isProviderSetupValid(
-    provider: LlmProvider,
-    apiKey: String,
-    baseUrl: String,
-    modelId: String,
-): Boolean {
-    if (baseUrl.trim().isEmpty() || modelId.trim().isEmpty()) return false
-    if (provider.requiresApiKey(baseUrl) && apiKey.trim().isEmpty()) return false
-    return true
-}
-
-val LlmProvider.requiresApiKey: Boolean
-    get() = this == LlmProvider.VertexExpress || this == LlmProvider.AnthropicMessages
-
-fun LlmProvider.requiresApiKey(baseUrl: String): Boolean =
-    requiresApiKey || usesOfficialOpenAiEndpoint(this, baseUrl)
-
-fun usesOfficialOpenAiEndpoint(
-    provider: LlmProvider,
-    baseUrl: String,
-): Boolean {
-    if (provider != LlmProvider.OpenAiResponses && provider != LlmProvider.OpenAiCompatible) return false
-    val host = runCatching {
-        URI(baseUrl.trim()).host.orEmpty().lowercase(Locale.US)
-    }.getOrDefault("")
-    return host == "api.openai.com"
-}
-
-val OfficialVertexPreviewModels: List<String> = listOf(
-    "gemini-3.1-pro",
-    "gemini-3-flash",
-    "gemini-3.1-flash-lite",
-    "gemini-3.1-pro-preview",
-    "gemini-3-flash-preview",
-    "gemini-3.1-flash-lite-preview",
-)
-
-fun usesOfficialVertexEndpoint(
-    provider: LlmProvider,
-    baseUrl: String,
-): Boolean {
-    if (provider != LlmProvider.VertexExpress) return false
-    val host = runCatching {
-        URI(baseUrl.trim()).host.orEmpty().lowercase(Locale.US)
-    }.getOrDefault("")
-    return host == "aiplatform.googleapis.com" ||
-        host.endsWith("-aiplatform.googleapis.com")
+        ProviderAuthMethod.Ambient ->
+            definition.supportsAmbientAuth
+    }
 }
 
 fun shouldMarkOnboardingCompleted(
@@ -338,16 +249,20 @@ data class LlmProviderConfig(
     val id: String = UUID.randomUUID().toString(),
     val providerId: String,
     val name: String,
-    val providerType: LlmProvider,
+    val piProviderId: String,
     val apiKey: String,
     val baseUrl: String,
+    val authMethod: ProviderAuthMethod = PiProviderCatalog
+        .resolve(piProviderId)
+        .defaultAuthMethod(),
+    val oauthCredentialJson: String = "",
+    val providerEnvironmentVariables: List<PiProviderEnvironmentVariable> = emptyList(),
     val modelId: String,
-    val manualModelIds: List<String> = listOf(modelId),
+    val manualModelIds: List<String> = listOf(modelId).filter(String::isNotBlank),
     val customHeaders: List<LlmCustomHeader> = emptyList(),
     val cachedModels: List<String> = emptyList(),
     val enabledModelIds: List<String> = cachedModels + manualModelIds,
     val isEnabled: Boolean = true,
-    val basicFunctionCallingCompatibilityMode: Boolean = false,
     val createdAtMillis: Long = System.currentTimeMillis(),
     val updatedAtMillis: Long = createdAtMillis,
 )
@@ -356,8 +271,22 @@ internal fun LlmProviderConfig.toJson(): JSONObject = JSONObject().apply {
     put("id", id)
     put("providerId", providerId)
     put("name", name)
-    put("providerType", providerType.storageValue)
+    put("piProviderId", piProviderId)
+    put("authMethod", authMethod.storageValue)
     put("apiKey", apiKey)
+    put("oauthCredentialJson", oauthCredentialJson)
+    put(
+        "providerEnvironmentVariables",
+        JSONArray().apply {
+            providerEnvironmentVariables.forEach { variable ->
+                put(
+                    JSONObject()
+                        .put("name", variable.name)
+                        .put("value", variable.value)
+                )
+            }
+        },
+    )
     put("baseUrl", baseUrl)
     put("modelId", modelId)
     put("manualModelIds", JSONArray().apply { manualModelIds.forEach(::put) })
@@ -365,7 +294,6 @@ internal fun LlmProviderConfig.toJson(): JSONObject = JSONObject().apply {
     put("cachedModels", JSONArray().apply { cachedModels.forEach(::put) })
     put("enabledModelIds", JSONArray().apply { enabledModelIds.forEach(::put) })
     put("isEnabled", isEnabled)
-    put("basicFunctionCallingCompatibilityMode", basicFunctionCallingCompatibilityMode)
     put("createdAtMillis", createdAtMillis)
     put("updatedAtMillis", updatedAtMillis)
 }
@@ -377,18 +305,25 @@ internal fun parseProviderConfigs(rawValue: String): List<LlmProviderConfig> {
         buildList {
             for (index in 0 until array.length()) {
                 val json = array.optJSONObject(index) ?: continue
-                val providerType = LlmProvider.fromStorage(json.optString("providerType"))
+                val storedPiProviderId = json.optString("piProviderId").trim()
+                val storedBaseUrl = json.optString("baseUrl").trim()
+                val piProviderId = storedPiProviderId.ifBlank {
+                    inferLegacyPiProviderId(json.optString("providerType"), storedBaseUrl)
+                }
+                val providerDefinition = PiProviderCatalog.resolve(piProviderId)
                 val providerName = json.optString("name").trim()
-                    .ifBlank { providerType.displayName }
-                val baseUrl = json.optString("baseUrl").trim()
-                    .ifBlank { providerType.defaultBaseUrl }
-                val modelId = json.optString("modelId").trim()
-                    .ifBlank { providerType.defaultModelId }
+                    .ifBlank { providerDefinition.displayName }
+                val baseUrl = storedBaseUrl.ifBlank { providerDefinition.defaultBaseUrl }
+                val modelId = if (json.has("modelId")) {
+                    json.optString("modelId").trim()
+                } else {
+                    providerDefinition.defaultModelId
+                }
                 val enabledModelIds = json.optJSONArray("enabledModelIds").toStringListSafe()
                 val manualModelIds = if (json.has("manualModelIds")) {
                     json.optJSONArray("manualModelIds").toStringListSafe()
                 } else {
-                    listOf(modelId)
+                    listOf(modelId).filter(String::isNotBlank)
                 }
                 val cachedModels = normalizeStringList(
                     buildList {
@@ -401,14 +336,22 @@ internal fun parseProviderConfigs(rawValue: String): List<LlmProviderConfig> {
                 val availableModels = normalizeStringList(cachedModels + manualModelIds)
                 val inferredProviderId = providerName
                     .sanitizeProviderId()
-                    .ifBlank { "${providerType.storageValue}_${index + 1}" }
+                    .ifBlank { "${providerDefinition.id.sanitizeProviderId()}_${index + 1}" }
                 add(
                     LlmProviderConfig(
                         id = json.optString("id").trim().ifBlank { UUID.randomUUID().toString() },
                         providerId = json.optString("providerId").trim().ifBlank { inferredProviderId },
                         name = providerName,
-                        providerType = providerType,
+                        piProviderId = piProviderId,
+                        authMethod = ProviderAuthMethod.fromStorage(
+                            json.optString("authMethod"),
+                            providerDefinition.defaultAuthMethod(),
+                        ),
                         apiKey = json.optString("apiKey"),
+                        oauthCredentialJson = json.optString("oauthCredentialJson"),
+                        providerEnvironmentVariables = parseProviderEnvironmentVariables(
+                            json.optJSONArray("providerEnvironmentVariables"),
+                        ),
                         baseUrl = baseUrl,
                         modelId = modelId,
                         manualModelIds = manualModelIds,
@@ -424,10 +367,6 @@ internal fun parseProviderConfigs(rawValue: String): List<LlmProviderConfig> {
                         } else {
                             true
                         },
-                        basicFunctionCallingCompatibilityMode = json.optBoolean(
-                            "basicFunctionCallingCompatibilityMode",
-                            false,
-                        ),
                         createdAtMillis = json.optLong("createdAtMillis", System.currentTimeMillis()),
                         updatedAtMillis = json.optLong("updatedAtMillis", System.currentTimeMillis()),
                     )
@@ -466,6 +405,25 @@ internal fun parseCustomHeaders(array: JSONArray?): List<LlmCustomHeader> {
             )
         }
     }.distinctBy { it.name.lowercase(Locale.US) }
+}
+
+internal fun parseProviderEnvironmentVariables(
+    array: JSONArray?,
+): List<PiProviderEnvironmentVariable> {
+    if (array == null) return emptyList()
+    return buildList {
+        for (index in 0 until array.length()) {
+            val json = array.optJSONObject(index) ?: continue
+            val name = json.optString("name").trim()
+            if (name.isBlank()) continue
+            add(
+                PiProviderEnvironmentVariable(
+                    name = name,
+                    value = json.optString("value"),
+                )
+            )
+        }
+    }.distinctBy { it.name.uppercase(Locale.US) }
 }
 
 private fun JSONArray?.toStringListSafe(): List<String> {
@@ -513,12 +471,14 @@ data class ProviderModelOption(
     val providerConfigId: String,
     val providerId: String,
     val providerName: String,
-    val providerType: LlmProvider,
+    val piProviderId: String,
+    val authMethod: ProviderAuthMethod,
     val apiKey: String,
+    val oauthCredentialJson: String,
+    val providerEnvironmentVariables: List<PiProviderEnvironmentVariable>,
     val baseUrl: String,
     val modelId: String,
     val customHeaders: List<LlmCustomHeader>,
-    val basicFunctionCallingCompatibilityMode: Boolean,
     val fullLabel: String,
     val chatLabel: String,
 )
@@ -535,7 +495,13 @@ fun List<LlmProviderConfig>.availableModelOptions(
     includeDisabledModels: Boolean = false,
 ): List<ProviderModelOption> {
     val scopedConfigs = (if (includeDisabledProviders) this else filter { it.isEnabled })
-        .filter { it.baseUrl.trim().isNotEmpty() && it.providerId.trim().isNotEmpty() }
+        .filter { config ->
+            val definition = PiProviderCatalog.resolve(
+                config.piProviderId,
+            )
+            config.providerId.trim().isNotEmpty() &&
+                (!definition.requiresBaseUrl || config.baseUrl.trim().isNotEmpty())
+        }
     val modelCounts = scopedConfigs
         .flatMap { config ->
             val models = if (includeDisabledModels) config.availableModels() else config.enabledModels()
@@ -556,12 +522,14 @@ fun List<LlmProviderConfig>.availableModelOptions(
                 providerConfigId = config.id,
                 providerId = providerId,
                 providerName = providerName,
-                providerType = config.providerType,
+                piProviderId = config.piProviderId,
+                authMethod = config.authMethod,
                 apiKey = config.apiKey,
+                oauthCredentialJson = config.oauthCredentialJson,
+                providerEnvironmentVariables = config.providerEnvironmentVariables,
                 baseUrl = config.baseUrl.trim(),
                 modelId = normalizedModelId,
                 customHeaders = config.customHeaders,
-                basicFunctionCallingCompatibilityMode = config.basicFunctionCallingCompatibilityMode,
                 fullLabel = fullLabel,
                 chatLabel = if ((modelCounts[normalizedModelId] ?: 0) > 1) fullLabel else normalizedModelId,
             )
@@ -577,12 +545,15 @@ private fun ProviderModelOption.modelProviderPrefixSortKey(): String =
     modelId.substringBefore('/').trim().ifBlank { modelId }
 
 fun AppSettings.withModelOption(option: ProviderModelOption): AppSettings = copy(
-    provider = option.providerType,
+    piProviderId = option.piProviderId,
+    providerConfigId = option.providerConfigId,
+    providerAuthMethod = option.authMethod,
     apiKey = option.apiKey.trim(),
+    oauthCredentialJson = option.oauthCredentialJson,
+    providerEnvironmentVariables = option.providerEnvironmentVariables,
     baseUrl = option.baseUrl.trim(),
     modelId = option.modelId.trim(),
     customHeaders = option.customHeaders,
-    basicFunctionCallingCompatibilityMode = option.basicFunctionCallingCompatibilityMode,
 )
 
 fun List<ProviderModelOption>.findModelOption(key: String?): ProviderModelOption? =

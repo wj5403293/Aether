@@ -1,5 +1,8 @@
 import java.util.Properties
 import com.posthog.android.PostHogCliExecTask
+import org.gradle.api.file.DirectoryProperty
+import org.gradle.api.tasks.OutputDirectory
+import org.gradle.api.tasks.Sync
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
@@ -38,7 +41,60 @@ val appVersionName = providers.gradleProperty("aether.versionName")
     .orNull
     ?.trim()
     ?.takeIf { it.isNotEmpty() }
-    ?: "1.7.0"
+    ?: "2.0.0"
+val piBridgeProjectDir = rootProject.layout.projectDirectory.dir("pi-bridge")
+val piBridgeGeneratedAssetsDir = layout.buildDirectory.dir("generated/assets/piBridge")
+val piProviderIconsGeneratedResDir = layout.buildDirectory.dir("generated/res/piProviderIcons")
+val piProviderIconFiles = mapOf(
+    "provider_amazon_bedrock.png" to "bedrock-color.png",
+    "provider_ant_ling.png" to "antgroup-color.png",
+    "provider_anthropic.png" to "anthropic.png",
+    "provider_azure_openai_responses.png" to "azure-color.png",
+    "provider_cerebras.png" to "cerebras-color.png",
+    "provider_cloudflare_ai_gateway.png" to "cloudflare-color.png",
+    "provider_cloudflare_workers_ai.png" to "workersai-color.png",
+    "provider_deepseek.png" to "deepseek-color.png",
+    "provider_fireworks.png" to "fireworks-color.png",
+    "provider_github_copilot.png" to "githubcopilot.png",
+    "provider_google.png" to "google-color.png",
+    "provider_google_vertex.png" to "vertexai-color.png",
+    "provider_groq.png" to "groq.png",
+    "provider_huggingface.png" to "huggingface-color.png",
+    "provider_kimi_coding.png" to "kimi-color.png",
+    "provider_minimax.png" to "minimax-color.png",
+    "provider_minimax_cn.png" to "minimax-color.png",
+    "provider_mistral.png" to "mistral-color.png",
+    "provider_moonshotai.png" to "moonshot.png",
+    "provider_moonshotai_cn.png" to "moonshot.png",
+    "provider_nvidia.png" to "nvidia-color.png",
+    "provider_openai.png" to "openai.png",
+    "provider_openai_codex.png" to "codex-color.png",
+    "provider_openai_compatible.png" to "openai.png",
+    "provider_opencode.png" to "opencode.png",
+    "provider_opencode_go.png" to "opencode.png",
+    "provider_openrouter.png" to "openrouter.png",
+    "provider_together.png" to "together-color.png",
+    "provider_vercel_ai_gateway.png" to "vercel.png",
+    "provider_xai.png" to "xai.png",
+    "provider_xiaomi.png" to "xiaomimimo.png",
+    "provider_xiaomi_token_plan_ams.png" to "xiaomimimo.png",
+    "provider_xiaomi_token_plan_cn.png" to "xiaomimimo.png",
+    "provider_xiaomi_token_plan_sgp.png" to "xiaomimimo.png",
+    "provider_zai.png" to "zai.png",
+    "provider_zai_coding_cn.png" to "zai.png",
+)
+
+fun npmExecutable(): String =
+    if (System.getProperty("os.name").lowercase().contains("windows")) "npm.cmd" else "npm"
+
+abstract class SyncGeneratedSourceDirectory : Sync() {
+    @get:OutputDirectory
+    abstract val outputDirectory: DirectoryProperty
+
+    init {
+        into(outputDirectory)
+    }
+}
 
 android {
     namespace = "com.zhousl.aether"
@@ -50,8 +106,12 @@ android {
         // Alpine/Termux-style local runtimes install executable ELF files into app-private
         // storage. Android blocks execve() from that location for targetSdk >= 29.
         targetSdk = 28
-        versionCode = 8
+        versionCode = 9
         versionName = appVersionName
+
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -206,5 +266,64 @@ tasks.withType<PostHogCliExecTask>().configureEach {
     }
     if (posthogExecutable.isNotBlank()) {
         postHogExecutable.set(posthogExecutable)
+    }
+}
+
+val installPiBridgeDependencies = tasks.register<Exec>("installPiBridgeDependencies") {
+    workingDir = piBridgeProjectDir.asFile
+    commandLine(npmExecutable(), "install", "--ignore-scripts", "--legacy-peer-deps")
+    inputs.file(piBridgeProjectDir.file("package.json"))
+    inputs.file(piBridgeProjectDir.file("package-lock.json"))
+    outputs.dir(piBridgeProjectDir.dir("node_modules"))
+}
+
+val buildPiBridge = tasks.register<Exec>("buildPiBridge") {
+    dependsOn(installPiBridgeDependencies)
+    workingDir = piBridgeProjectDir.asFile
+    commandLine(npmExecutable(), "run", "build")
+    inputs.file(piBridgeProjectDir.file("package.json"))
+    inputs.file(piBridgeProjectDir.file("tsconfig.json"))
+    inputs.dir(piBridgeProjectDir.dir("src"))
+    outputs.file(piBridgeProjectDir.file("dist/bridge.mjs"))
+}
+
+val copyPiProviderIcons = tasks.register<SyncGeneratedSourceDirectory>("copyPiProviderIcons") {
+    dependsOn(installPiBridgeDependencies)
+    val iconSourceDir = piBridgeProjectDir.dir(
+        "node_modules/@lobehub/icons-static-png/light",
+    )
+    outputDirectory.set(piProviderIconsGeneratedResDir)
+    piProviderIconFiles.forEach { (outputName, sourceName) ->
+        from(iconSourceDir.file(sourceName)) {
+            into("drawable-nodpi")
+            rename { outputName }
+        }
+    }
+    inputs.file(piBridgeProjectDir.file("package-lock.json"))
+    piProviderIconFiles.values.distinct().forEach { sourceName ->
+        inputs.file(iconSourceDir.file(sourceName))
+    }
+}
+
+val copyPiBridgeAsset = tasks.register<SyncGeneratedSourceDirectory>("copyPiBridgeAsset") {
+    dependsOn(buildPiBridge)
+    outputDirectory.set(piBridgeGeneratedAssetsDir)
+    from(piBridgeProjectDir.file("dist/bridge.mjs"))
+    eachFile {
+        path = "pi-bridge/$path"
+    }
+    includeEmptyDirs = false
+}
+
+androidComponents {
+    onVariants(selector().all()) { variant ->
+        variant.sources.assets?.addGeneratedSourceDirectory(
+            copyPiBridgeAsset,
+            SyncGeneratedSourceDirectory::outputDirectory,
+        )
+        variant.sources.res?.addGeneratedSourceDirectory(
+            copyPiProviderIcons,
+            SyncGeneratedSourceDirectory::outputDirectory,
+        )
     }
 }

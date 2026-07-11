@@ -30,6 +30,7 @@ class QueuedTurnRequestBuilderTest {
             messages = emptyList(),
             messageCount = existingMessages.size,
             lastMessageAtMillis = 2L,
+            agentModeEnabled = true,
         )
         val queuedInput = ChatMessage(
             id = "user-2",
@@ -47,5 +48,6 @@ class QueuedTurnRequestBuilderTest {
         assertEquals(listOf("user-1", "agent-1", "user-2"), updated.messages.map { it.id })
         assertEquals(3, updated.messageCount)
         assertEquals(3L, updated.lastMessageAtMillis)
+        assertEquals(true, updated.agentModeEnabled)
     }
 }

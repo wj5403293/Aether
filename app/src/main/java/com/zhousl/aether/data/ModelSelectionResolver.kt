@@ -69,7 +69,7 @@ fun resolveDefaultCompactingModelKey(
         purpose = AutomaticModelPurpose.Compacting,
         fallbackPurpose = AutomaticModelPurpose.Chat,
         preferredAutomaticModelKey = options
-            .filter { it.providerType == LlmProvider.OpenAiResponses }
+            .filter { it.piProviderId == "openai" || it.piProviderId == "openai-codex" }
             .resolveAutomaticModelKey(AutomaticModelPurpose.Compacting),
     )
 }

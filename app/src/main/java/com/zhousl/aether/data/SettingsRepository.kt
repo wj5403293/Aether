@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.UUID
 
 private val Context.dataStore by preferencesDataStore(name = "aether_settings")
 
@@ -21,10 +22,20 @@ class SettingsRepository(
     val settings: Flow<AppSettings> = context.dataStore.data.map { preferences ->
         val defaults = AppSettings()
         val storedWorkspaceMode = AgentWorkspaceMode.fromStorage(preferences[AGENT_WORKSPACE_MODE])
+        val storedBaseUrl = preferences[BASE_URL] ?: defaults.baseUrl
         AppSettings(
-            provider = LlmProvider.fromStorage(preferences[PROVIDER]),
+            piProviderId = preferences[PI_PROVIDER_ID]
+                ?.takeIf(String::isNotBlank)
+                ?: inferLegacyPiProviderId(preferences[PROVIDER], storedBaseUrl),
+            providerConfigId = preferences[PROVIDER_CONFIG_ID].orEmpty(),
+            providerAuthMethod = ProviderAuthMethod.fromStorage(preferences[PROVIDER_AUTH_METHOD]),
             apiKey = preferences[API_KEY].orEmpty(),
-            baseUrl = preferences[BASE_URL] ?: defaults.baseUrl,
+            oauthCredentialJson = preferences[OAUTH_CREDENTIAL_JSON].orEmpty(),
+            providerEnvironmentVariables = parseProviderEnvironmentVariables(
+                preferences[PROVIDER_ENVIRONMENT_VARIABLES]
+                    ?.let { raw -> runCatching { JSONArray(raw) }.getOrNull() },
+            ),
+            baseUrl = storedBaseUrl,
             modelId = preferences[MODEL_ID] ?: defaults.modelId,
             systemPrompt = preferences[SYSTEM_PROMPT] ?: defaults.systemPrompt,
             tavilyApiKey = preferences[TAVILY_API_KEY].orEmpty(),
@@ -83,11 +94,6 @@ class SettingsRepository(
             defaultTitleModelKey = preferences[DEFAULT_TITLE_MODEL_KEY].orEmpty(),
             defaultNamingModelKey = preferences[DEFAULT_NAMING_MODEL_KEY].orEmpty(),
             defaultCompactingModelKey = preferences[DEFAULT_COMPACTING_MODEL_KEY].orEmpty(),
-            unsupportedParallelToolCallProviderKeys = parseStoredStringList(
-                preferences[UNSUPPORTED_PARALLEL_TOOL_CALL_PROVIDER_KEYS].orEmpty()
-            ),
-            basicFunctionCallingCompatibilityMode =
-                preferences[BASIC_FUNCTION_CALLING_COMPATIBILITY_MODE] ?: false,
             onboardingSeenVersion = preferences[ONBOARDING_SEEN_VERSION] ?: 0,
             onboardingCompletedVersion = preferences[ONBOARDING_COMPLETED_VERSION] ?: 0,
             privacyPolicyAccepted = preferences[PRIVACY_POLICY_ACCEPTED] ?: false,
@@ -98,6 +104,100 @@ class SettingsRepository(
     // ── Multi-Provider support ───────────────────────────────────────────────
     val providerConfigs: Flow<List<LlmProviderConfig>> = context.dataStore.data.map { preferences ->
         parseProviderConfigs(preferences[PROVIDER_CONFIGS].orEmpty())
+    }
+
+    suspend fun migrateLegacyProvidersToPi() {
+        context.dataStore.edit { prefs ->
+            val rawConfigs = prefs[PROVIDER_CONFIGS].orEmpty()
+            val parsedConfigs = parseProviderConfigs(rawConfigs).toMutableList()
+            val requiresConfigMigration = runCatching {
+                val array = JSONArray(rawConfigs)
+                (0 until array.length()).any { index ->
+                    val item = array.optJSONObject(index)
+                    item != null && (
+                        item.optString("piProviderId").isBlank() ||
+                            item.optString("authMethod").isBlank() ||
+                            item.has("providerType") ||
+                            item.has("basicFunctionCallingCompatibilityMode")
+                        )
+                }
+            }.getOrDefault(false)
+            if (
+                !requiresConfigMigration &&
+                prefs[PI_PROVIDER_ID]?.isNotBlank() == true &&
+                prefs[PROVIDER_AUTH_METHOD]?.isNotBlank() == true &&
+                prefs[PROVIDER] == null
+            ) {
+                return@edit
+            }
+            val legacyBaseUrl = prefs[BASE_URL] ?: AppSettings().baseUrl
+            val legacyApiKey = prefs[API_KEY].orEmpty()
+            val legacyModelId = prefs[MODEL_ID] ?: AppSettings().modelId
+            val migratedPiProviderId = prefs[PI_PROVIDER_ID]
+                ?.takeIf(String::isNotBlank)
+                ?: inferLegacyPiProviderId(prefs[PROVIDER], legacyBaseUrl)
+            val definition = PiProviderCatalog.resolve(migratedPiProviderId)
+            var matchingConfig = prefs[PROVIDER_CONFIG_ID]
+                ?.let { currentId -> parsedConfigs.firstOrNull { it.id == currentId } }
+                ?: parsedConfigs.firstOrNull { config ->
+                    config.piProviderId == definition.id &&
+                        config.baseUrl.trim() == legacyBaseUrl.trim() &&
+                        config.apiKey.trim() == legacyApiKey.trim() &&
+                        config.availableModels().contains(legacyModelId.trim())
+                }
+
+            val hasLegacySingleProvider = prefs[PROVIDER] != null ||
+                prefs[API_KEY]?.isNotBlank() == true ||
+                prefs[BASE_URL]?.isNotBlank() == true ||
+                prefs[MODEL_ID]?.isNotBlank() == true
+            if (matchingConfig == null && hasLegacySingleProvider) {
+                val baseProviderId = definition.id.sanitizeProviderId()
+                    .ifBlank { "provider" }
+                val migratedProviderId = generateSequence(baseProviderId) { current ->
+                    val suffix = current.substringAfterLast('_').toIntOrNull()
+                    "${baseProviderId}_${(suffix ?: 1) + 1}"
+                }.first { candidate -> parsedConfigs.none { it.providerId == candidate } }
+                matchingConfig = LlmProviderConfig(
+                    id = UUID.randomUUID().toString(),
+                    providerId = migratedProviderId,
+                    name = definition.displayName,
+                    piProviderId = definition.id,
+                    authMethod = definition.defaultAuthMethod(),
+                    apiKey = legacyApiKey,
+                    baseUrl = legacyBaseUrl.ifBlank { definition.defaultBaseUrl },
+                    modelId = legacyModelId.ifBlank { definition.defaultModelId },
+                    manualModelIds = listOf(
+                        legacyModelId.ifBlank { definition.defaultModelId },
+                    ).filter(String::isNotBlank),
+                    enabledModelIds = listOf(
+                        legacyModelId.ifBlank { definition.defaultModelId },
+                    ).filter(String::isNotBlank),
+                )
+                parsedConfigs += matchingConfig
+            }
+
+            if (requiresConfigMigration || matchingConfig != null) {
+                prefs[PROVIDER_CONFIGS] = serializeProviderConfigs(parsedConfigs)
+            }
+            prefs[PI_PROVIDER_ID] = definition.id
+            prefs[PROVIDER_AUTH_METHOD] = (
+                matchingConfig?.authMethod ?: definition.defaultAuthMethod()
+                ).storageValue
+            matchingConfig?.let { config ->
+                prefs[PROVIDER_CONFIG_ID] = config.id
+                prefs[API_KEY] = config.apiKey
+                prefs[OAUTH_CREDENTIAL_JSON] = config.oauthCredentialJson
+                prefs[PROVIDER_ENVIRONMENT_VARIABLES] =
+                    serializeProviderEnvironmentVariables(
+                        config.providerEnvironmentVariables,
+                    )
+                prefs[BASE_URL] = config.baseUrl
+                prefs[MODEL_ID] = legacyModelId.ifBlank { config.modelId }
+            }
+            prefs.remove(PROVIDER)
+            prefs.remove(BASIC_FUNCTION_CALLING_COMPATIBILITY_MODE)
+            prefs.remove(UNSUPPORTED_PARALLEL_TOOL_CALL_PROVIDER_KEYS)
+        }
     }
 
     suspend fun upsertProviderConfig(config: LlmProviderConfig) {
@@ -122,20 +222,51 @@ class SettingsRepository(
         }
     }
 
+    suspend fun updateProviderOAuthCredential(
+        id: String,
+        credentialJson: String,
+    ) {
+        if (id.isBlank() || credentialJson.isBlank()) return
+        context.dataStore.edit { prefs ->
+            val current = parseProviderConfigs(prefs[PROVIDER_CONFIGS].orEmpty())
+            val updated = current.map { config ->
+                if (config.id == id) {
+                    config.copy(
+                        oauthCredentialJson = credentialJson,
+                        updatedAtMillis = System.currentTimeMillis(),
+                    )
+                } else {
+                    config
+                }
+            }
+            prefs[PROVIDER_CONFIGS] = serializeProviderConfigs(updated)
+            if (prefs[PROVIDER_CONFIG_ID] == id) {
+                prefs[OAUTH_CREDENTIAL_JSON] = credentialJson
+            }
+        }
+    }
+
     suspend fun setProviderEnabled(
         id: String,
         enabled: Boolean,
     ) {
         context.dataStore.edit { prefs ->
             val current = parseProviderConfigs(prefs[PROVIDER_CONFIGS].orEmpty())
-            val currentProvider = LlmProvider.fromStorage(prefs[PROVIDER])
+            val currentPiProviderId = prefs[PI_PROVIDER_ID]
+                ?.takeIf(String::isNotBlank)
+                ?: inferLegacyPiProviderId(
+                    prefs[PROVIDER],
+                    prefs[BASE_URL] ?: AppSettings().baseUrl,
+                )
+            val currentProviderConfigId = prefs[PROVIDER_CONFIG_ID].orEmpty()
             val currentApiKey = prefs[API_KEY].orEmpty()
             val currentBaseUrl = prefs[BASE_URL] ?: AppSettings().baseUrl
             val currentModelId = prefs[MODEL_ID] ?: AppSettings().modelId
             val toggledConfigWasCurrent = current
                 .firstOrNull { it.id == id }
                 ?.matchesStoredModel(
-                    provider = currentProvider,
+                    piProviderId = currentPiProviderId,
+                    providerConfigId = currentProviderConfigId,
                     apiKey = currentApiKey,
                     baseUrl = currentBaseUrl,
                     modelId = currentModelId,
@@ -148,7 +279,8 @@ class SettingsRepository(
             val availableOptions = updated.availableModelOptions()
             val currentStillAvailable = availableOptions.any {
                 it.matchesStoredModel(
-                    provider = currentProvider,
+                    piProviderId = currentPiProviderId,
+                    providerConfigId = currentProviderConfigId,
                     apiKey = currentApiKey,
                     baseUrl = currentBaseUrl,
                     modelId = currentModelId,
@@ -156,23 +288,33 @@ class SettingsRepository(
             }
             val fallbackOption = availableOptions.firstOrNull()
             if (!enabled && toggledConfigWasCurrent && !currentStillAvailable && fallbackOption != null) {
-                prefs[PROVIDER] = fallbackOption.providerType.storageValue
+                prefs[PI_PROVIDER_ID] = fallbackOption.piProviderId
+                prefs[PROVIDER_CONFIG_ID] = fallbackOption.providerConfigId
+                prefs[PROVIDER_AUTH_METHOD] = fallbackOption.authMethod.storageValue
                 prefs[API_KEY] = fallbackOption.apiKey
+                prefs[OAUTH_CREDENTIAL_JSON] = fallbackOption.oauthCredentialJson
+                prefs[PROVIDER_ENVIRONMENT_VARIABLES] = serializeProviderEnvironmentVariables(
+                    fallbackOption.providerEnvironmentVariables,
+                )
                 prefs[BASE_URL] = fallbackOption.baseUrl
                 prefs[MODEL_ID] = fallbackOption.modelId
             }
         }
     }
 
-    // ── Legacy single-provider methods ───────────────────────────────────────
-
     suspend fun replaceImportedSettings(
         settings: AppSettings,
         providerConfigs: List<LlmProviderConfig>,
     ) {
         context.dataStore.edit {
-            it[PROVIDER] = settings.provider.storageValue
+            it[PI_PROVIDER_ID] = settings.piProviderId
+            it[PROVIDER_CONFIG_ID] = settings.providerConfigId
+            it[PROVIDER_AUTH_METHOD] = settings.providerAuthMethod.storageValue
             it[API_KEY] = settings.apiKey
+            it[OAUTH_CREDENTIAL_JSON] = settings.oauthCredentialJson
+            it[PROVIDER_ENVIRONMENT_VARIABLES] = serializeProviderEnvironmentVariables(
+                settings.providerEnvironmentVariables,
+            )
             it[BASE_URL] = settings.baseUrl
             it[MODEL_ID] = settings.modelId
             it[SYSTEM_PROMPT] = settings.systemPrompt
@@ -210,9 +352,9 @@ class SettingsRepository(
             it[DEFAULT_TITLE_MODEL_KEY] = settings.defaultTitleModelKey
             it[DEFAULT_NAMING_MODEL_KEY] = settings.defaultNamingModelKey
             it[DEFAULT_COMPACTING_MODEL_KEY] = settings.defaultCompactingModelKey
-            it[UNSUPPORTED_PARALLEL_TOOL_CALL_PROVIDER_KEYS] =
-                serializeStoredStringList(settings.unsupportedParallelToolCallProviderKeys)
-            it[BASIC_FUNCTION_CALLING_COMPATIBILITY_MODE] = settings.basicFunctionCallingCompatibilityMode
+            it.remove(PROVIDER)
+            it.remove(BASIC_FUNCTION_CALLING_COMPATIBILITY_MODE)
+            it.remove(UNSUPPORTED_PARALLEL_TOOL_CALL_PROVIDER_KEYS)
             it[ONBOARDING_SEEN_VERSION] = settings.onboardingSeenVersion
             it[ONBOARDING_COMPLETED_VERSION] = settings.onboardingCompletedVersion
             it[PRIVACY_POLICY_ACCEPTED] = settings.privacyPolicyAccepted
@@ -255,8 +397,14 @@ class SettingsRepository(
 
     suspend fun updateSettings(settings: AppSettings) {
         context.dataStore.edit {
-            it[PROVIDER] = settings.provider.storageValue
+            it[PI_PROVIDER_ID] = settings.piProviderId
+            it[PROVIDER_CONFIG_ID] = settings.providerConfigId
+            it[PROVIDER_AUTH_METHOD] = settings.providerAuthMethod.storageValue
             it[API_KEY] = settings.apiKey
+            it[OAUTH_CREDENTIAL_JSON] = settings.oauthCredentialJson
+            it[PROVIDER_ENVIRONMENT_VARIABLES] = serializeProviderEnvironmentVariables(
+                settings.providerEnvironmentVariables,
+            )
             it[BASE_URL] = settings.baseUrl
             it[MODEL_ID] = settings.modelId
             it[SYSTEM_PROMPT] = settings.systemPrompt
@@ -294,25 +442,11 @@ class SettingsRepository(
             it[DEFAULT_TITLE_MODEL_KEY] = settings.defaultTitleModelKey
             it[DEFAULT_NAMING_MODEL_KEY] = settings.defaultNamingModelKey
             it[DEFAULT_COMPACTING_MODEL_KEY] = settings.defaultCompactingModelKey
-            it[UNSUPPORTED_PARALLEL_TOOL_CALL_PROVIDER_KEYS] =
-                serializeStoredStringList(settings.unsupportedParallelToolCallProviderKeys)
-            it[BASIC_FUNCTION_CALLING_COMPATIBILITY_MODE] = settings.basicFunctionCallingCompatibilityMode
+            it.remove(PROVIDER)
+            it.remove(BASIC_FUNCTION_CALLING_COMPATIBILITY_MODE)
+            it.remove(UNSUPPORTED_PARALLEL_TOOL_CALL_PROVIDER_KEYS)
             it[PRIVACY_POLICY_ACCEPTED] = settings.privacyPolicyAccepted
             it[LAST_UPDATE_CHECK_AT_MILLIS] = settings.lastUpdateCheckAtMillis
-        }
-    }
-
-    suspend fun markParallelToolCallsUnsupported(providerKey: String) {
-        val normalizedProviderKey = providerKey.trim()
-        if (normalizedProviderKey.isBlank()) return
-        context.dataStore.edit { prefs ->
-            val current = parseStoredStringList(
-                prefs[UNSUPPORTED_PARALLEL_TOOL_CALL_PROVIDER_KEYS].orEmpty()
-            )
-            if (normalizedProviderKey !in current) {
-                prefs[UNSUPPORTED_PARALLEL_TOOL_CALL_PROVIDER_KEYS] =
-                    serializeStoredStringList((current + normalizedProviderKey).takeLast(MaxUnsupportedParallelToolCallKeys))
-            }
         }
     }
 
@@ -347,7 +481,12 @@ class SettingsRepository(
 
     private companion object {
         val PROVIDER = stringPreferencesKey("provider")
+        val PI_PROVIDER_ID = stringPreferencesKey("pi_provider_id")
+        val PROVIDER_CONFIG_ID = stringPreferencesKey("provider_config_id")
+        val PROVIDER_AUTH_METHOD = stringPreferencesKey("provider_auth_method")
         val API_KEY = stringPreferencesKey("api_key")
+        val OAUTH_CREDENTIAL_JSON = stringPreferencesKey("oauth_credential_json")
+        val PROVIDER_ENVIRONMENT_VARIABLES = stringPreferencesKey("provider_environment_variables")
         val BASE_URL = stringPreferencesKey("base_url")
         val MODEL_ID = stringPreferencesKey("model_id")
         val SYSTEM_PROMPT = stringPreferencesKey("system_prompt")
@@ -403,54 +542,51 @@ class SettingsRepository(
         val ONBOARDING_COMPLETED_VERSION = intPreferencesKey("onboarding_completed_version")
         val PRIVACY_POLICY_ACCEPTED = booleanPreferencesKey("privacy_policy_accepted")
         val LAST_UPDATE_CHECK_AT_MILLIS = longPreferencesKey("last_update_check_at_millis")
-        const val MaxUnsupportedParallelToolCallKeys = 128
     }
 }
 
 private fun LlmProviderConfig.matchesStoredModel(
-    provider: LlmProvider,
+    piProviderId: String,
+    providerConfigId: String,
     apiKey: String,
     baseUrl: String,
     modelId: String,
 ): Boolean =
-    providerType == provider &&
+    (id == providerConfigId || this.piProviderId == piProviderId) &&
         this.apiKey.trim() == apiKey.trim() &&
         this.baseUrl.trim() == baseUrl.trim() &&
         enabledModels().contains(modelId.trim())
 
 private fun ProviderModelOption.matchesStoredModel(
-    provider: LlmProvider,
+    piProviderId: String,
+    providerConfigId: String,
     apiKey: String,
     baseUrl: String,
     modelId: String,
 ): Boolean =
-    providerType == provider &&
+    (this.providerConfigId == providerConfigId || this.piProviderId == piProviderId) &&
         this.apiKey.trim() == apiKey.trim() &&
         this.baseUrl.trim() == baseUrl.trim() &&
         this.modelId.trim() == modelId.trim()
 
-private fun parseStoredStringList(rawValue: String): List<String> {
-    if (rawValue.isBlank()) return emptyList()
-    return runCatching {
-        val array = JSONArray(rawValue)
-        buildList {
-            for (index in 0 until array.length()) {
-                val value = array.optString(index).trim()
-                if (value.isNotEmpty()) {
-                    add(value)
-                }
+private fun serializeProviderEnvironmentVariables(
+    variables: List<PiProviderEnvironmentVariable>,
+): String = JSONArray().apply {
+    variables
+        .mapNotNull { variable ->
+            variable.name.trim().takeIf(String::isNotBlank)?.let { name ->
+                PiProviderEnvironmentVariable(name, variable.value)
             }
-        }.distinct()
-    }.getOrDefault(emptyList())
-}
-
-private fun serializeStoredStringList(values: List<String>): String =
-    JSONArray().apply {
-        values.map(String::trim)
-            .filter(String::isNotEmpty)
-            .distinct()
-            .forEach(::put)
-    }.toString()
+        }
+        .distinctBy { it.name.uppercase() }
+        .forEach { variable ->
+            put(
+                JSONObject()
+                    .put("name", variable.name)
+                    .put("value", variable.value)
+            )
+        }
+}.toString()
 
 private val TermuxEnvironmentVariableNamePattern = Regex("^[A-Za-z_][A-Za-z0-9_]*$")
 

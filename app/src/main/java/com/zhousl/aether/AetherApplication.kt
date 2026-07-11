@@ -11,6 +11,7 @@ import com.zhousl.aether.data.AgentExtensionsRepository
 import com.zhousl.aether.data.AgentModeController
 import com.zhousl.aether.data.AgentSkillManager
 import com.zhousl.aether.data.AetherDiagnosticLogger
+import com.zhousl.aether.data.AetherToolExecutor
 import com.zhousl.aether.data.ChatRepository
 import com.zhousl.aether.data.RootSetupController
 import com.zhousl.aether.data.ChatStateStore
@@ -22,6 +23,9 @@ import com.zhousl.aether.data.SessionExecutionManager
 import com.zhousl.aether.data.SettingsRepository
 import com.zhousl.aether.data.WebToolsClient
 import com.zhousl.aether.data.WorkspaceFileBridge
+import com.zhousl.aether.data.pi.PiCompletionClient
+import com.zhousl.aether.data.pi.PiAgentRunner
+import com.zhousl.aether.data.pi.PiKernelBridge
 import com.zhousl.aether.runtime.AlpineRuntime
 import com.zhousl.aether.runtime.RuntimeRouter
 import com.zhousl.aether.runtime.TermuxRuntime
@@ -104,6 +108,14 @@ class AetherAppRuntime(
         context = application,
         diagnosticLogger = diagnosticLogger,
     )
+    val piKernelBridge = PiKernelBridge(
+        alpineRuntime = alpineRuntime,
+        diagnosticLogger = diagnosticLogger,
+    )
+    val piCompletionClient = PiCompletionClient(
+        bridge = piKernelBridge,
+        settingsRepository = settingsRepository,
+    )
     val runtimeRouter = RuntimeRouter(
         termuxRuntime = termuxRuntime,
         alpineRuntime = alpineRuntime,
@@ -128,6 +140,19 @@ class AetherAppRuntime(
         extensionsRepository = extensionsRepository,
     )
     val webToolsClient = WebToolsClient()
+    val piAgentRunner = PiAgentRunner(
+        bridge = piKernelBridge,
+        settingsRepository = settingsRepository,
+        diagnosticLogger = diagnosticLogger,
+        toolExecutor = AetherToolExecutor(
+            runtimeRouter = runtimeRouter,
+            skillManager = skillManager,
+            webToolsClient = webToolsClient,
+            workspaceFileBridge = workspaceFileBridge,
+            piCompletionClient = piCompletionClient,
+            agentModeController = agentModeController,
+        ),
+    )
     val appForegroundTracker = AppForegroundTracker()
     val notificationController = AetherNotificationController(application)
     val scheduledTaskScheduler = ScheduledTaskScheduler(
@@ -156,10 +181,11 @@ class AetherAppRuntime(
         agentModeController = agentModeController,
         skillManager = skillManager,
         scheduledTaskManager = scheduledTaskManager,
-        webToolsClient = webToolsClient,
         notificationController = notificationController,
         appForegroundTracker = appForegroundTracker,
         diagnosticLogger = diagnosticLogger,
+        piCompletionClient = piCompletionClient,
+        piAgentRunner = piAgentRunner,
     )
 
     fun initialize() {
@@ -175,6 +201,9 @@ class AetherAppRuntime(
         )
         notificationController.ensureChannels()
         ProcessLifecycleOwner.get().lifecycle.addObserver(appForegroundTracker)
+        appScope.launch {
+            settingsRepository.migrateLegacyProvidersToPi()
+        }
         appScope.launch {
             if (settingsRepository.settings.first().privacyPolicyAccepted) {
                 initializePostHog()
