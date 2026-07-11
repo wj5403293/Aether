@@ -12,7 +12,7 @@ class ProviderConfigSerializationTest {
         val configs = parseProviderConfigs(
             JSONArray().put(
                 JSONObject()
-                    .put("providerType", LlmProvider.AnthropicMessages.storageValue)
+                    .put("providerType", "anthropic_messages")
                     .put("name", "")
                     .put("baseUrl", "")
                     .put("modelId", "claude-test")
@@ -20,12 +20,34 @@ class ProviderConfigSerializationTest {
         )
 
         val config = configs.single()
-        assertEquals(LlmProvider.AnthropicMessages.displayName, config.name)
-        assertEquals(LlmProvider.AnthropicMessages.defaultBaseUrl, config.baseUrl)
+        assertEquals("anthropic", config.piProviderId)
+        assertEquals("Anthropic", config.name)
+        assertEquals("https://api.anthropic.com", config.baseUrl)
 
         val option = configs.availableModelOptions().single()
-        assertEquals(LlmProvider.AnthropicMessages.defaultBaseUrl, option.baseUrl)
+        assertEquals("https://api.anthropic.com", option.baseUrl)
         assertEquals("claude-test", option.modelId)
+    }
+
+    @Test
+    fun piNativeSerializationDropsLegacyProviderFields() {
+        val serialized = serializeProviderConfigs(
+            listOf(
+                LlmProviderConfig(
+                    providerId = "anthropic",
+                    name = "Anthropic",
+                    piProviderId = "anthropic",
+                    apiKey = "test-key",
+                    baseUrl = "https://api.anthropic.com",
+                    modelId = "claude-sonnet-4-5",
+                )
+            )
+        )
+
+        val json = JSONArray(serialized).getJSONObject(0)
+        assertEquals("anthropic", json.getString("piProviderId"))
+        assertTrue(!json.has("providerType"))
+        assertTrue(!json.has("basicFunctionCallingCompatibilityMode"))
     }
 
     @Test
@@ -35,7 +57,7 @@ class ProviderConfigSerializationTest {
                 id = "bad-provider",
                 providerId = "bad",
                 name = "Bad",
-                providerType = LlmProvider.OpenAiCompatible,
+                piProviderId = "openai-compatible",
                 apiKey = "",
                 baseUrl = "",
                 modelId = "model-a",
@@ -52,7 +74,7 @@ class ProviderConfigSerializationTest {
                 id = "enabled-provider",
                 providerId = "enabled",
                 name = "Enabled",
-                providerType = LlmProvider.OpenAiCompatible,
+                piProviderId = "openai-compatible",
                 apiKey = "",
                 baseUrl = "https://enabled.example/v1",
                 modelId = "enabled-model",
@@ -64,7 +86,7 @@ class ProviderConfigSerializationTest {
                 id = "disabled-provider",
                 providerId = "disabled",
                 name = "Disabled",
-                providerType = LlmProvider.OpenAiCompatible,
+                piProviderId = "openai-compatible",
                 apiKey = "",
                 baseUrl = "https://disabled.example/v1",
                 modelId = "disabled-provider-model",
@@ -84,7 +106,7 @@ class ProviderConfigSerializationTest {
                 id = "first-site",
                 providerId = "site_a",
                 name = "Site A",
-                providerType = LlmProvider.OpenAiCompatible,
+                piProviderId = "openai-compatible",
                 apiKey = "",
                 baseUrl = "https://site-a.example/v1",
                 modelId = "google/gemini-pro",
@@ -95,7 +117,7 @@ class ProviderConfigSerializationTest {
                 id = "second-site",
                 providerId = "site_b",
                 name = "Site B",
-                providerType = LlmProvider.OpenAiCompatible,
+                piProviderId = "openai-compatible",
                 apiKey = "",
                 baseUrl = "https://site-b.example/v1",
                 modelId = "openai/gpt-4o",
@@ -122,7 +144,7 @@ class ProviderConfigSerializationTest {
                 LlmProviderConfig(
                     providerId = "openrouter",
                     name = "OpenRouter",
-                    providerType = LlmProvider.OpenAiCompatible,
+                    piProviderId = "openrouter",
                     apiKey = "test-key",
                     baseUrl = "https://openrouter.ai/api/v1",
                     modelId = "openai/gpt-test",
@@ -150,7 +172,7 @@ class ProviderConfigSerializationTest {
                 LlmProviderConfig(
                     providerId = "custom",
                     name = "Custom",
-                    providerType = LlmProvider.OpenAiCompatible,
+                    piProviderId = "openai-compatible",
                     apiKey = "test-key",
                     baseUrl = "https://api.example.com/v1",
                     modelId = "manual-a",
@@ -169,11 +191,35 @@ class ProviderConfigSerializationTest {
     }
 
     @Test
+    fun providerConfigRoundTripsAnExplicitlyEmptyModelId() {
+        val serialized = serializeProviderConfigs(
+            listOf(
+                LlmProviderConfig(
+                    providerId = "openai",
+                    name = "OpenAI",
+                    piProviderId = "openai",
+                    apiKey = "test-key",
+                    baseUrl = "https://api.openai.com/v1",
+                    modelId = "",
+                    manualModelIds = emptyList(),
+                    enabledModelIds = emptyList(),
+                )
+            )
+        )
+
+        val config = parseProviderConfigs(serialized).single()
+
+        assertEquals("", config.modelId)
+        assertEquals(emptyList<String>(), config.manualModelIds)
+        assertEquals(emptyList<String>(), config.enabledModelIds)
+    }
+
+    @Test
     fun providerConfigDropsEnabledManualModelWhenManualModelIdIsRemoved() {
         val config = LlmProviderConfig(
             providerId = "custom",
             name = "Custom",
-            providerType = LlmProvider.OpenAiCompatible,
+            piProviderId = "openai-compatible",
             apiKey = "test-key",
             baseUrl = "https://api.example.com/v1",
             modelId = "fetched-a",

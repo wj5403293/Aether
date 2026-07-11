@@ -4,11 +4,13 @@ import com.zhousl.aether.data.AppSettings
 import com.zhousl.aether.data.LlmImagePart
 import com.zhousl.aether.data.LlmMessage
 import com.zhousl.aether.data.LlmTextPart
+import com.zhousl.aether.data.SettingsRepository
 import org.json.JSONArray
 import org.json.JSONObject
 
 class PiCompletionClient(
     private val bridge: PiKernelBridge,
+    private val settingsRepository: SettingsRepository? = null,
 ) {
     suspend fun completeOnce(
         settings: AppSettings,
@@ -23,9 +25,19 @@ class PiCompletionClient(
             put("system_prompt", systemPrompt)
             put("messages", messages.toPiJson())
             put("stream", stream)
-            if (disableReasoning) put("reasoning", "off")
+            put("reasoning", if (disableReasoning) "off" else settings.toPiThinkingLevel())
         }
-        bridge.completeOnce(payload, onEvent).toPiCompletionResult()
+        bridge.completeOnce(payload, onEvent).toPiCompletionResult().also { result ->
+            if (
+                settings.providerConfigId.isNotBlank() &&
+                result.updatedOauthCredentialJson.isNotBlank()
+            ) {
+                settingsRepository?.updateProviderOAuthCredential(
+                    settings.providerConfigId,
+                    result.updatedOauthCredentialJson,
+                )
+            }
+        }
     }
 }
 

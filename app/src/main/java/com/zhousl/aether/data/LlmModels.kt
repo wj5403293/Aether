@@ -1,14 +1,6 @@
 package com.zhousl.aether.data
 
 import org.json.JSONObject
-data class ChatCompletionResult(
-    val assistantText: String,
-    val toolCalls: List<ChatCompletionToolCall>,
-    val assistantMessage: JSONObject,
-    val reasoningText: String = "",
-    val reasoningSummaryText: String = "",
-    val tokenUsage: LlmTokenUsage? = null,
-)
 
 data class LlmTokenUsage(
     val inputTokens: Long? = null,
@@ -41,23 +33,6 @@ data class LlmTokenUsage(
         }
     }
 }
-
-data class ChatCompletionToolCall(
-    val id: String,
-    val name: String,
-    val arguments: String,
-)
-
-data class ChatCompletionToolResult(
-    val callId: String,
-    val name: String,
-    val output: String,
-)
-
-data class OpenAiResponsesCompactionResult(
-    val assistantText: String,
-    val providerPayload: JSONObject,
-)
 
 sealed interface LlmContentPart
 

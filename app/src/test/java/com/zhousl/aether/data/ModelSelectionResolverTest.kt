@@ -97,7 +97,7 @@ class ModelSelectionResolverTest {
             providerId = "openai",
             baseUrl = "https://api.openai.com/v1",
             modelId = "gpt-5.4",
-            providerType = LlmProvider.OpenAiResponses,
+            piProviderId = "openai",
         )
 
         val resolved = resolveDefaultCompactingModelKey(
@@ -113,12 +113,12 @@ class ModelSelectionResolverTest {
         providerId: String,
         baseUrl: String,
         modelId: String,
-        providerType: LlmProvider = LlmProvider.OpenAiCompatible,
+        piProviderId: String = "openai-compatible",
     ): LlmProviderConfig = LlmProviderConfig(
         id = id,
         providerId = providerId,
         name = providerId,
-        providerType = providerType,
+        piProviderId = piProviderId,
         apiKey = "test-key",
         baseUrl = baseUrl,
         modelId = modelId,

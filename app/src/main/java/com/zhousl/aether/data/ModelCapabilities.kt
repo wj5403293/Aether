@@ -31,13 +31,6 @@ internal data class ModelCapabilities(
 
 internal object ModelCapabilitiesResolver {
     fun resolve(settings: AppSettings): ModelCapabilities {
-        if (
-            settings.provider != LlmProvider.OpenAiCompatible &&
-            settings.provider != LlmProvider.OpenAiResponses
-        ) {
-            return ModelCapabilities()
-        }
-
         val host = settings.normalizedBaseUrlHost()
         val model = settings.modelId.normalizedCapabilityText()
 

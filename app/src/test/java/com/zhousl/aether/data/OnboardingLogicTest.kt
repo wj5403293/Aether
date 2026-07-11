@@ -40,30 +40,32 @@ class OnboardingLogicTest {
     }
 
     @Test
-    fun providerValidationRequiresApiKeyForOfficialOpenAiAndVertexEndpoints() {
+    fun providerValidationUsesPiAuthenticationCapabilities() {
         assertFalse(
-            isProviderSetupValid(
-                provider = LlmProvider.OpenAiCompatible,
+            AppSettings(
+                piProviderId = "openai",
+                providerAuthMethod = ProviderAuthMethod.ApiKey,
                 apiKey = "",
                 baseUrl = "https://api.openai.com/v1",
                 modelId = "gpt-5.4",
-            )
-        )
-        assertFalse(
-            isProviderSetupValid(
-                provider = LlmProvider.VertexExpress,
-                apiKey = "",
-                baseUrl = "https://aiplatform.googleapis.com/v1",
-                modelId = "gemini-2.5-flash",
-            )
+            ).isProviderSetupValid()
         )
         assertTrue(
-            isProviderSetupValid(
-                provider = LlmProvider.OpenAiCompatible,
+            AppSettings(
+                piProviderId = "google-vertex",
+                providerAuthMethod = ProviderAuthMethod.Ambient,
+                apiKey = "",
+                baseUrl = "",
+                modelId = "",
+            ).isProviderSetupValid()
+        )
+        assertTrue(
+            AppSettings(
+                piProviderId = "openai-compatible",
                 apiKey = "",
                 baseUrl = "http://10.0.2.2:11434/v1",
                 modelId = "local-model",
-            )
+            ).isProviderSetupValid()
         )
     }
 
