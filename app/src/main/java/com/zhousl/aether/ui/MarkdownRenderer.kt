@@ -240,6 +240,7 @@ fun MarkdownContent(
                         onLinkClick = onLinkClick,
                     )
 
+                    is MarkdownBlock.ImageGroup -> MarkdownImageGroup(block.images)
                     is MarkdownBlock.Mermaid -> MarkdownMermaidBlock(block.diagram)
                     MarkdownBlock.Rule -> HorizontalDivider(color = AetherOutlineSoft)
                 }
@@ -299,7 +300,7 @@ private fun MarkdownBullets(
         items.forEach { item ->
             Row(modifier = Modifier.fillMaxWidth()) {
                 Text(
-                    text = "-",
+                    text = "\u2022",
                     style = MaterialTheme.typography.bodyLarge,
                     color = AetherOnSurface,
                 )
@@ -549,12 +550,11 @@ private fun MarkdownImageBlock(
                 imageState.html != null -> MarkdownHtmlBlock(
                     html = imageState.html!!,
                     layout = image.layout,
-                    defaultMinHeightDp = DefaultImageMinHeightDp,
+                    defaultMinHeightDp = 1,
                     defaultMaxHeightDp = DefaultImageMaxHeightDp,
                     modifier = widthModifier
-                        .clip(RoundedCornerShape(18.dp))
-                        .background(AetherSurfaceHigh),
-                    backgroundColor = AetherSurfaceHigh,
+                        .clip(RoundedCornerShape(8.dp)),
+                    backgroundColor = Color.Transparent,
                     onTap = if (canPreview) {
                         { showPreview = true }
                     } else {
@@ -567,20 +567,17 @@ private fun MarkdownImageBlock(
                     altText = image.altText,
                     layout = image.layout,
                     modifier = widthModifier
-                        .clip(RoundedCornerShape(18.dp))
-                        .background(AetherSurfaceHigh)
+                        .clip(RoundedCornerShape(8.dp))
                         .clickable { showPreview = true },
                 )
 
                 else -> Box(
                     modifier = widthModifier
                         .heightIn(
-                            min = (image.layout.minHeightDp ?: DefaultImageMinHeightDp).dp,
+                            min = 72.dp,
                             max = (image.layout.maxHeightDp ?: DefaultImageMaxHeightDp).dp,
                         )
-                        .clip(RoundedCornerShape(18.dp))
-                        .background(AetherSurfaceHigh)
-                        .padding(12.dp),
+                        .clip(RoundedCornerShape(8.dp)),
                     contentAlignment = Alignment.Center,
                 ) {
                     if (imageState.error != null) {
@@ -621,6 +618,24 @@ private fun MarkdownImageBlock(
             onOpenLink = onLinkClick,
         )
     }
+}
+
+@Composable
+private fun MarkdownImageGroup(
+    images: List<MarkdownImageSpec>,
+) {
+    MarkdownHtmlBlock(
+        html = remember(images) { buildMarkdownBadgeGroupHtml(images) },
+        layout = MarkdownMediaLayout(
+            minHeightDp = 1,
+            maxHeightDp = 120,
+            showAll = true,
+        ),
+        defaultMinHeightDp = 1,
+        defaultMaxHeightDp = 120,
+        modifier = Modifier.fillMaxWidth(),
+        backgroundColor = Color.Transparent,
+    )
 }
 
 @Composable
@@ -813,8 +828,14 @@ private fun MarkdownBitmapImageBlock(
     BoxWithConstraints(modifier = modifier) {
         val resolvedMaxHeight = (layout.maxHeightDp ?: DefaultImageMaxHeightDp).dp
         val explicitHeight = layout.heightDp?.dp
+        val naturalWidth = if (bitmap.width > 0) {
+            bitmap.width.dp.coerceAtMost(maxWidth)
+        } else {
+            maxWidth
+        }
+        val renderWidth = if (layout.width == null) naturalWidth else maxWidth
         val naturalHeight = if (bitmap.width > 0 && bitmap.height > 0) {
-            maxWidth * (bitmap.height.toFloat() / bitmap.width.toFloat())
+            renderWidth * (bitmap.height.toFloat() / bitmap.width.toFloat())
         } else {
             resolvedMaxHeight
         }
@@ -827,9 +848,8 @@ private fun MarkdownBitmapImageBlock(
 
         Box(
             modifier = Modifier
-                .fillMaxWidth()
-                .height(containerHeight)
-                .padding(12.dp),
+                .width(renderWidth)
+                .height(containerHeight),
             contentAlignment = if (needsVerticalScroll) Alignment.TopCenter else Alignment.Center,
         ) {
             when {
@@ -1179,6 +1199,7 @@ private sealed interface MarkdownBlock {
     data class OrderedList(val items: List<MarkdownSourceText>) : MarkdownBlock
     data class Quote(val text: MarkdownSourceText) : MarkdownBlock
     data class Image(val image: MarkdownImageSpec) : MarkdownBlock
+    data class ImageGroup(val images: List<MarkdownImageSpec>) : MarkdownBlock
     data class Mermaid(val diagram: MarkdownMermaidSpec) : MarkdownBlock
     data class Table(
         val headers: List<MarkdownSourceText>,
@@ -1233,6 +1254,19 @@ private fun parseMarkdown(markdown: String): List<MarkdownBlock> {
             continue
         }
 
+        val setextHeadingLevel = setextHeadingLevel(lines, index)
+        if (setextHeadingLevel != null) {
+            blocks += MarkdownBlock.Heading(
+                level = setextHeadingLevel,
+                text = MarkdownSourceText(
+                    text = trimmed,
+                    sourceOffset = line.startOffset + line.text.indexOf(trimmed).coerceAtLeast(0),
+                ),
+            )
+            index += 2
+            continue
+        }
+
         val headingMatch = headingPattern.matchEntire(trimmed)
         if (headingMatch != null) {
             blocks += MarkdownBlock.Heading(
@@ -1250,7 +1284,7 @@ private fun parseMarkdown(markdown: String): List<MarkdownBlock> {
             continue
         }
 
-        if (trimmed == "---" || trimmed == "***") {
+        if (horizontalRulePattern.matches(trimmed)) {
             blocks += MarkdownBlock.Rule
             index++
             continue
@@ -1348,9 +1382,13 @@ private fun parseMarkdown(markdown: String): List<MarkdownBlock> {
             continue
         }
 
-        val image = parseMarkdownImage(trimmed)
-        if (image != null) {
-            blocks += MarkdownBlock.Image(image)
+        val images = parseMarkdownImageSequence(trimmed)
+        if (images != null) {
+            blocks += if (images.size == 1) {
+                MarkdownBlock.Image(images.single())
+            } else {
+                MarkdownBlock.ImageGroup(images)
+            }
             index++
             continue
         }
@@ -1417,20 +1455,44 @@ private fun beginsSpecialBlock(
     val trimmed = line.trim()
     return trimmed.startsWith("```") ||
         looksLikeMarkdownImageLine(trimmed) ||
+        setextHeadingLevel(lines, index) != null ||
         looksLikeMarkdownTable(lines, index) ||
         headingPattern.matches(trimmed) ||
         unorderedPattern.matches(trimmed) ||
         orderedPattern.matches(trimmed) ||
         trimmed.startsWith(">") ||
-        trimmed == "---" ||
-        trimmed == "***"
+        horizontalRulePattern.matches(trimmed)
 }
 
 private val headingPattern = Regex("^(#{1,6})\\s+(.+)$")
 private val unorderedPattern = Regex("^[-*+]\\s+(.+)$")
 private val orderedPattern = Regex("^(\\d+)[.)]\\s+(.+)$")
+private val setextHeadingPattern = Regex("^\\s*(=+|-+)\\s*$")
+private val horizontalRulePattern = Regex(
+    "^(?:(?:\\*\\s*){3,}|(?:-\\s*){3,}|(?:_\\s*){3,})$"
+)
 private val markdownTableSeparatorPattern = Regex("^:?-{3,}:?$")
 private val autoLinkPattern = Regex("""^(https?://\S+|www\.\S+)""")
+
+private fun setextHeadingLevel(
+    lines: List<MarkdownLine>,
+    index: Int,
+): Int? {
+    val heading = lines.getOrNull(index)?.text?.trim().orEmpty()
+    if (heading.isBlank() || beginsStandaloneMarkdownBlock(heading)) return null
+    val underline = lines.getOrNull(index + 1)?.text ?: return null
+    val match = setextHeadingPattern.matchEntire(underline) ?: return null
+    return if (match.groupValues[1].startsWith("=")) 1 else 2
+}
+
+private fun beginsStandaloneMarkdownBlock(trimmed: String): Boolean =
+    trimmed.startsWith("```") ||
+        trimmed.startsWith(">") ||
+        headingPattern.matches(trimmed) ||
+        unorderedPattern.matches(trimmed) ||
+        orderedPattern.matches(trimmed) ||
+        parseMarkdownImageSequence(trimmed) != null ||
+        horizontalRulePattern.matches(trimmed)
 
 private fun looksLikeMarkdownTable(
     lines: List<MarkdownLine>,
@@ -1449,7 +1511,7 @@ private fun looksLikeMarkdownTableLine(line: String): Boolean =
     line.count { it == '|' } >= 1
 
 private fun looksLikeMarkdownImageLine(line: String): Boolean =
-    parseMarkdownImage(line) != null
+    parseMarkdownImageSequence(line) != null
 
 private fun looksLikeMarkdownTableDataRow(
     line: String,
@@ -2321,6 +2383,69 @@ private fun buildImageDataUrl(
     mimeType: String,
 ): String = "data:$mimeType;base64,${Base64.getEncoder().encodeToString(bytes)}"
 
+internal fun buildMarkdownBadgeGroupHtml(
+    images: List<MarkdownImageSpec>,
+): String {
+    val imageTags = images.joinToString("\n") { image ->
+        """<img src="${escapeHtml(image.url)}" alt="${escapeHtml(image.altText)}" />"""
+    }
+    return """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+            <style>
+                html, body {
+                    margin: 0;
+                    padding: 0;
+                    background: transparent;
+                }
+                .badge-row {
+                    display: flex;
+                    flex-wrap: wrap;
+                    align-items: center;
+                    gap: 6px;
+                }
+                img {
+                    display: block;
+                    width: auto;
+                    height: auto;
+                    max-width: 100%;
+                    max-height: 32px;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="badge-row">$imageTags</div>
+            <script>
+                function reportAetherHeight() {
+                    const height = Math.max(
+                        document.documentElement.scrollHeight || 0,
+                        document.body.scrollHeight || 0,
+                        1
+                    );
+                    if (window.$MarkdownHtmlBridgeName && window.$MarkdownHtmlBridgeName.reportHeight) {
+                        window.$MarkdownHtmlBridgeName.reportHeight(String(height));
+                    }
+                }
+                document.querySelectorAll('img').forEach(function(image) {
+                    image.addEventListener('load', reportAetherHeight);
+                    image.addEventListener('error', function() {
+                        image.style.display = 'none';
+                        reportAetherHeight();
+                    });
+                });
+                window.reportAetherHeight = reportAetherHeight;
+                window.addEventListener('load', function() {
+                    setTimeout(reportAetherHeight, 0);
+                    setTimeout(reportAetherHeight, 120);
+                });
+            </script>
+        </body>
+        </html>
+    """.trimIndent()
+}
+
 internal fun buildMarkdownInlineSvgHtml(
     svg: String,
 ): String {
@@ -2337,13 +2462,12 @@ internal fun buildMarkdownInlineSvgHtml(
                     background: transparent;
                 }
                 body {
-                    padding: 12px;
+                    padding: 0;
                 }
                 .image-shell {
                     display: flex;
                     align-items: center;
-                    justify-content: center;
-                    min-height: 136px;
+                    justify-content: flex-start;
                 }
                 .image-shell > svg {
                     display: block;
@@ -2362,7 +2486,7 @@ internal fun buildMarkdownInlineSvgHtml(
                     const height = Math.max(
                         document.documentElement.scrollHeight || 0,
                         document.body.scrollHeight || 0,
-                        160
+                        1
                     );
                     if (window.$MarkdownHtmlBridgeName && window.$MarkdownHtmlBridgeName.reportHeight) {
                         window.$MarkdownHtmlBridgeName.reportHeight(String(height));
@@ -2403,13 +2527,12 @@ private fun buildMarkdownImageHtml(
                 background: transparent;
             }
             body {
-                padding: 12px;
+                padding: 0;
             }
             .image-shell {
                 display: flex;
                 align-items: center;
-                justify-content: center;
-                min-height: 136px;
+                justify-content: flex-start;
             }
             img {
                 display: block;
@@ -2435,7 +2558,7 @@ private fun buildMarkdownImageHtml(
                 const height = Math.max(
                     document.documentElement.scrollHeight || 0,
                     document.body.scrollHeight || 0,
-                    160
+                    1
                 );
                 if (window.$MarkdownHtmlBridgeName && window.$MarkdownHtmlBridgeName.reportHeight) {
                     window.$MarkdownHtmlBridgeName.reportHeight(String(height));

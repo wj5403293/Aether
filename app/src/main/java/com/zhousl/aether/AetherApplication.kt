@@ -13,6 +13,7 @@ import com.zhousl.aether.data.AgentSkillManager
 import com.zhousl.aether.data.AetherDiagnosticLogger
 import com.zhousl.aether.data.AetherToolExecutor
 import com.zhousl.aether.data.ChatRepository
+import com.zhousl.aether.data.PiExtensionManager
 import com.zhousl.aether.data.RootSetupController
 import com.zhousl.aether.data.ChatStateStore
 import com.zhousl.aether.data.ScheduledTask
@@ -139,6 +140,12 @@ class AetherAppRuntime(
         context = application,
         extensionsRepository = extensionsRepository,
     )
+    val piExtensionManager = PiExtensionManager(
+        context = application,
+        alpineRuntime = alpineRuntime,
+        piKernelBridge = piKernelBridge,
+        skillManager = skillManager,
+    )
     val webToolsClient = WebToolsClient()
     val piAgentRunner = PiAgentRunner(
         bridge = piKernelBridge,
@@ -185,6 +192,7 @@ class AetherAppRuntime(
         appForegroundTracker = appForegroundTracker,
         diagnosticLogger = diagnosticLogger,
         piCompletionClient = piCompletionClient,
+        piKernelBridge = piKernelBridge,
         piAgentRunner = piAgentRunner,
     )
 

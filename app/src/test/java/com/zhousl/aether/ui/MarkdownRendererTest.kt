@@ -72,6 +72,50 @@ class MarkdownRendererTest {
     }
 
     @Test
+    fun parseMarkdownImageSequenceSupportsLinkedAndAdjacentImages() {
+        val images = parseMarkdownImageSequence(
+            "[![Build](https://example.com/build.svg)](https://example.com/actions) " +
+                "![Coverage](https://example.com/coverage.svg)"
+        )
+
+        requireNotNull(images)
+        assertEquals(2, images.size)
+        assertEquals("Build", images[0].altText)
+        assertEquals("https://example.com/build.svg", images[0].url)
+        assertEquals("Coverage", images[1].altText)
+    }
+
+    @Test
+    fun parseMarkdownRecognizesHtmlConverterListsRulesAndSetextHeadings() {
+        val blocks = parseMarkdownBlocks(
+            """
+            Package README
+            ==============
+
+            * First feature
+            * Second feature
+
+            *** ** * ** ***
+            """.trimIndent(),
+        )
+
+        assertEquals(
+            listOf("Heading", "UnorderedList", "Rule"),
+            blocks.map { it?.javaClass?.simpleName },
+        )
+    }
+
+    @Test
+    fun parseMarkdownCreatesImageBlocksForLinkedBadgeRows() {
+        val blocks = parseMarkdownBlocks(
+            "[![Build](https://example.com/build.svg)](https://example.com/actions) " +
+                "[![Coverage](https://example.com/coverage.svg)](https://example.com/coverage)"
+        )
+
+        assertEquals(listOf("ImageGroup"), blocks.map { it?.javaClass?.simpleName })
+    }
+
+    @Test
     fun normalizeMarkdownImageUrlDecodesCommonHtmlEscapes() {
         assertEquals(
             "https://example.com/image.png?foo=1&bar=2",
@@ -133,6 +177,20 @@ class MarkdownRendererTest {
 
         assertTrue(html.contains("<svg viewBox=\"0 0 10 10\"></svg>"))
         assertFalse(html.contains("alt=\"preview\""))
+    }
+
+    @Test
+    fun buildMarkdownBadgeGroupHtmlUsesCompactNaturalImageSizing() {
+        val html = buildMarkdownBadgeGroupHtml(
+            listOf(
+                MarkdownImageSpec("Build", "https://example.com/build.svg"),
+                MarkdownImageSpec("Coverage", "https://example.com/coverage.svg"),
+            )
+        )
+
+        assertTrue(html.contains("class=\"badge-row\""))
+        assertTrue(html.contains("max-height: 32px"))
+        assertFalse(html.contains("min-height: 136px"))
     }
 
     @Test

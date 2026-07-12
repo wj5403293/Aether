@@ -41,15 +41,34 @@ import {
   InMemorySessionRepo,
   NodeExecutionEnv,
   type AgentMessage,
+  type AgentHarnessEvent,
   type AgentTool,
   type AgentToolResult,
 } from "@earendil-works/pi-agent-core/node";
+import {
+  createSyntheticSourceInfo,
+  type BuildSystemPromptOptions,
+  type ExtensionCommandContext,
+  type ExtensionEvent,
+  type RegisteredTool,
+  type ToolInfo,
+} from "@earendil-works/pi-coding-agent";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import type { TSchema } from "typebox";
+import {
+  extensionTools,
+  installAetherExtensionPackage,
+  listAetherExtensionPackages,
+  loadAetherExtensions,
+  removeAetherExtensionPackage,
+  updateAetherExtensionPackage,
+  type AetherExtensionRuntime,
+} from "./extensions.js";
 
 const BRIDGE_VERSION = "2.0.0-alpha.0";
 const PI_AI_VERSION = "0.80.6";
 const PI_AGENT_CORE_VERSION = "0.80.6";
+const PI_CODING_AGENT_VERSION = "0.80.6";
 const AETHER_MANUAL_OAUTH_CALLBACK_HOST = "203.0.113.1";
 const OAUTH_FETCH_MAX_ATTEMPTS = 3;
 const DEFAULT_HARNESS_SESSION_LIMIT = 8;
@@ -113,6 +132,14 @@ interface HarnessSessionState {
   credentialStore?: BridgeCredentialStore;
   session: InMemorySession;
   harness: AgentHarness;
+  hostTools: AgentTool[];
+  extensionRuntime: AetherExtensionRuntime;
+  configuredExtensionPaths: string[];
+  pendingExtensionRuntime?: AetherExtensionRuntime;
+  extensionUnsubscribers: Array<() => void>;
+  pendingToolRefresh: boolean;
+  pendingActiveToolNames?: string[];
+  currentSignal?: AbortSignal;
   systemPrompt: string;
   currentRequestId: string;
   toolArgsById: Map<string, unknown>;
@@ -1139,6 +1166,477 @@ function createHostTool(state: HarnessSessionState, definition: HostToolDefiniti
   };
 }
 
+function extensionMessageText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .flatMap((part) => {
+      const value = asObject(part);
+      return value.type === "text" ? [asString(value.text)] : [];
+    })
+    .join("\n");
+}
+
+function allSessionTools(state: HarnessSessionState): AgentTool[] {
+  const tools = new Map(state.hostTools.map((tool) => [tool.name, tool]));
+  for (const tool of extensionTools(state.extensionRuntime)) {
+    tools.set(tool.name, tool);
+  }
+  return [...tools.values()];
+}
+
+function allSessionToolInfo(state: HarnessSessionState): ToolInfo[] {
+  const tools = new Map<string, ToolInfo>();
+  for (const tool of state.hostTools) {
+    tools.set(tool.name, {
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.parameters,
+      sourceInfo: createSyntheticSourceInfo(`<aether:${tool.name}>`, {
+        source: "sdk",
+      }),
+    });
+  }
+  for (const registered of state.extensionRuntime.runner.getAllRegisteredTools()) {
+    const definition = registered.definition;
+    tools.set(definition.name, {
+      name: definition.name,
+      description: definition.description,
+      parameters: definition.parameters,
+      promptGuidelines: definition.promptGuidelines,
+      sourceInfo: registered.sourceInfo,
+    });
+  }
+  return [...tools.values()];
+}
+
+function sessionCommands(state: HarnessSessionState) {
+  return state.extensionRuntime.runner.getRegisteredCommands().map((command) => ({
+    name: command.invocationName,
+    description: command.description,
+    source: "extension" as const,
+    sourceInfo: command.sourceInfo,
+  }));
+}
+
+async function refreshSessionTools(
+  state: HarnessSessionState,
+  requestedActiveToolNames?: string[],
+): Promise<void> {
+  const previousToolNames = new Set(state.harness.getTools().map((tool) => tool.name));
+  const previousActiveNames =
+    requestedActiveToolNames ?? state.harness.getActiveTools().map((tool) => tool.name);
+  const tools = allSessionTools(state);
+  const toolNames = new Set(tools.map((tool) => tool.name));
+  const activeNames = previousActiveNames.filter((name) => toolNames.has(name));
+  for (const tool of tools) {
+    if (!previousToolNames.has(tool.name)) activeNames.push(tool.name);
+  }
+  await state.harness.setTools(tools, [...new Set(activeNames)]);
+}
+
+function queueExtensionUserMessage(
+  state: HarnessSessionState,
+  content: string | Array<TextContent | ImageContent>,
+  deliverAs?: "steer" | "followUp",
+): void {
+  const text = extensionMessageText(content);
+  const images = Array.isArray(content)
+    ? content.filter((part): part is ImageContent => part.type === "image")
+    : [];
+  if (!text && images.length === 0) return;
+  const options = images.length > 0 ? { images } : undefined;
+  if (state.currentRequestId) {
+    const operation =
+      deliverAs === "steer"
+        ? state.harness.steer(text, options)
+        : state.harness.followUp(text, options);
+    void operation.catch((error) => {
+      stderr.write(`pi extension message failed: ${errorMessageWithCause(error)}\n`);
+    });
+    return;
+  }
+  void state.harness.nextTurn(text, options).catch((error) => {
+    stderr.write(`pi extension message failed: ${errorMessageWithCause(error)}\n`);
+  });
+}
+
+function extensionSystemPromptOptions(state: HarnessSessionState): BuildSystemPromptOptions {
+  return {
+    cwd: state.workspaceDirectory,
+  } as BuildSystemPromptOptions;
+}
+
+function bindExtensionCore(state: HarnessSessionState): void {
+  const runner = state.extensionRuntime.runner;
+  runner.bindCore(
+    {
+      sendMessage: (message, options) => {
+        state.extensionRuntime.sessionManager.appendCustomMessageEntry(
+          message.customType,
+          message.content,
+          message.display,
+          message.details,
+        );
+        if (options?.triggerTurn || options?.deliverAs) {
+          queueExtensionUserMessage(
+            state,
+            message.content,
+            options.deliverAs === "steer" ? "steer" : "followUp",
+          );
+        }
+      },
+      sendUserMessage: (content, options) => {
+        queueExtensionUserMessage(state, content, options?.deliverAs);
+      },
+      appendEntry: (customType, data) => {
+        state.extensionRuntime.sessionManager.appendCustomEntry(customType, data);
+      },
+      setSessionName: (name) => {
+        state.extensionRuntime.sessionManager.appendSessionInfo(name);
+        void runner.emit({
+          type: "session_info_changed",
+          name: state.extensionRuntime.sessionManager.getSessionName(),
+        });
+      },
+      getSessionName: () => state.extensionRuntime.sessionManager.getSessionName(),
+      setLabel: (entryId, label) => {
+        state.extensionRuntime.sessionManager.appendLabelChange(entryId, label);
+      },
+      getActiveTools: () => state.harness.getActiveTools().map((tool) => tool.name),
+      getAllTools: () => allSessionToolInfo(state),
+      setActiveTools: (toolNames) => {
+        if (state.currentRequestId) {
+          state.pendingActiveToolNames = [...toolNames];
+          return;
+        }
+        void state.harness.setActiveTools(toolNames).catch((error) => {
+          runner.emitError({
+            extensionPath: "<aether>",
+            event: "set_active_tools",
+            error: errorMessageWithCause(error),
+          });
+        });
+      },
+      refreshTools: () => {
+        if (state.currentRequestId) {
+          state.pendingToolRefresh = true;
+          return;
+        }
+        void refreshSessionTools(state).catch((error) => {
+          runner.emitError({
+            extensionPath: "<aether>",
+            event: "refresh_tools",
+            error: errorMessageWithCause(error),
+          });
+        });
+      },
+      getCommands: () => sessionCommands(state),
+      setModel: async (model) => {
+        const available = state.models.getModel(model.provider, model.id);
+        if (!available) return false;
+        await state.harness.setModel(available);
+        state.model = available;
+        return true;
+      },
+      getThinkingLevel: () => state.harness.getThinkingLevel(),
+      setThinkingLevel: (level) => {
+        void state.harness.setThinkingLevel(level).catch((error) => {
+          runner.emitError({
+            extensionPath: "<aether>",
+            event: "set_thinking_level",
+            error: errorMessageWithCause(error),
+          });
+        });
+      },
+    },
+    {
+      getModel: () => state.harness.getModel(),
+      isIdle: () => !state.currentRequestId,
+      isProjectTrusted: () => true,
+      getSignal: () => state.currentSignal,
+      abort: () => {
+        void state.harness.abort();
+      },
+      hasPendingMessages: () => false,
+      shutdown: () => {
+        void closeHarnessSession(state.sessionId, state);
+      },
+      getContextUsage: () => ({
+        tokens: null,
+        contextWindow: state.harness.getModel().contextWindow,
+        percent: null,
+      }),
+      compact: (options) => {
+        void state.harness
+          .compact(options?.customInstructions)
+          .then((result) => options?.onComplete?.(result))
+          .catch((error) =>
+            options?.onError?.(error instanceof Error ? error : new Error(String(error))),
+          );
+      },
+      getSystemPrompt: () => state.systemPrompt,
+      getSystemPromptOptions: () => extensionSystemPromptOptions(state),
+    },
+  );
+  runner.bindCommandContext({
+    waitForIdle: () => state.harness.waitForIdle(),
+    newSession: async () => ({ cancelled: true }),
+    fork: async () => ({ cancelled: true }),
+    navigateTree: async (targetId, options) => {
+      const result = await state.harness.navigateTree(targetId, options);
+      return { cancelled: result.cancelled };
+    },
+    switchSession: async () => ({ cancelled: true }),
+    reload: async () => {
+      await reloadExtensionsForState(state);
+    },
+  });
+}
+
+function installExtensionHooks(state: HarnessSessionState): void {
+  const runner = state.extensionRuntime.runner;
+  state.extensionUnsubscribers.push(
+    runner.onError((error) => {
+      stderr.write(
+        `pi extension error (${error.extensionPath}, ${error.event}): ${error.error}\n`,
+      );
+      if (state.currentRequestId) {
+        writeEvent(state.currentRequestId, "extension_error", {
+          extension_path: error.extensionPath,
+          event: error.event,
+          error: error.error,
+        });
+      }
+    }),
+    state.harness.on("before_agent_start", async (event) => {
+      const result = await runner.emitBeforeAgentStart(
+        event.prompt,
+        event.images,
+        event.systemPrompt,
+        extensionSystemPromptOptions(state),
+      );
+      return result
+        ? {
+            messages: result.messages as AgentMessage[] | undefined,
+            systemPrompt: result.systemPrompt,
+          }
+        : undefined;
+    }),
+    state.harness.on("context", async (event) => ({
+      messages: await runner.emitContext(event.messages),
+    })),
+    state.harness.on("before_provider_request", async (event) => {
+      const headers = await runner.emitBeforeProviderHeaders({
+        ...(event.streamOptions.headers ?? {}),
+      });
+      return {
+        streamOptions: {
+          headers: Object.fromEntries(
+            Object.entries(headers).map(([name, value]) => [
+              name,
+              value === null ? undefined : value,
+            ]),
+          ),
+        },
+      };
+    }),
+    state.harness.on("before_provider_payload", async (event) => ({
+      payload: await runner.emitBeforeProviderRequest(event.payload),
+    })),
+    state.harness.on("tool_call", async (event) =>
+      runner.emitToolCall({
+        type: "tool_call",
+        toolCallId: event.toolCallId,
+        toolName: event.toolName,
+        input: event.input,
+      }),
+    ),
+    state.harness.on("tool_result", async (event) =>
+      runner.emitToolResult({
+        type: "tool_result",
+        toolCallId: event.toolCallId,
+        toolName: event.toolName,
+        input: event.input,
+        content: event.content,
+        details: event.details,
+        isError: event.isError,
+      }),
+    ),
+    state.harness.on("session_before_compact", async (event) =>
+      runner.emit({
+        type: "session_before_compact",
+        preparation: event.preparation as never,
+        branchEntries: event.branchEntries as never,
+        customInstructions: event.customInstructions,
+        reason: "manual",
+        willRetry: false,
+        signal: event.signal,
+      }),
+    ),
+    state.harness.on("session_before_tree", async (event) =>
+      runner.emit({
+        type: "session_before_tree",
+        preparation: event.preparation as never,
+        signal: event.signal,
+      }),
+    ),
+    state.harness.subscribe(async (event, signal) => {
+      state.currentSignal = signal;
+      await emitExtensionHarnessEvent(state, event);
+      if (event.type === "settled") {
+        state.currentSignal = undefined;
+      }
+    }),
+  );
+}
+
+async function emitExtensionHarnessEvent(
+  state: HarnessSessionState,
+  event: AgentHarnessEvent,
+): Promise<void> {
+  const runner = state.extensionRuntime.runner;
+  switch (event.type) {
+    case "agent_start":
+    case "agent_end":
+    case "turn_start":
+    case "turn_end":
+    case "message_start":
+    case "message_update":
+    case "tool_execution_start":
+    case "tool_execution_update":
+    case "tool_execution_end":
+      await runner.emit(event as never);
+      return;
+    case "message_end": {
+      state.extensionRuntime.sessionManager.appendMessage(event.message as never);
+      await runner.emitMessageEnd(event);
+      return;
+    }
+    case "settled":
+      await runner.emit({ type: "agent_settled" });
+      return;
+    case "after_provider_response":
+      await runner.emit(event);
+      return;
+    case "model_update":
+      await runner.emit({
+        type: "model_select",
+        model: event.model,
+        previousModel: event.previousModel,
+        source: event.source,
+      });
+      return;
+    case "thinking_level_update":
+      await runner.emit({
+        type: "thinking_level_select",
+        level: event.level,
+        previousLevel: event.previousLevel,
+      });
+      return;
+    case "session_compact":
+      await runner.emit({
+        type: "session_compact",
+        compactionEntry: event.compactionEntry as never,
+        fromExtension: event.fromHook,
+        reason: "manual",
+        willRetry: false,
+      });
+      return;
+    case "session_tree":
+      await runner.emit({
+        type: "session_tree",
+        newLeafId: event.newLeafId,
+        oldLeafId: event.oldLeafId,
+        summaryEntry: event.summaryEntry as never,
+        fromExtension: event.fromHook,
+      });
+      return;
+    default:
+      return;
+  }
+}
+
+function disposeExtensionRuntime(
+  state: HarnessSessionState,
+  reason: "quit" | "reload",
+): Promise<void> {
+  const runner = state.extensionRuntime.runner;
+  return runner
+    .emit({ type: "session_shutdown", reason })
+    .catch((error) => {
+      stderr.write(`pi extension shutdown failed: ${errorMessageWithCause(error)}\n`);
+    })
+    .then(() => {
+      for (const unsubscribe of state.extensionUnsubscribers.splice(0)) unsubscribe();
+      runner.invalidate();
+    });
+}
+
+async function activateExtensionRuntime(
+  state: HarnessSessionState,
+  nextRuntime: AetherExtensionRuntime,
+  reason: "startup" | "reload",
+): Promise<void> {
+  if (reason === "reload") await disposeExtensionRuntime(state, "reload");
+  state.extensionRuntime = nextRuntime;
+  bindExtensionCore(state);
+  installExtensionHooks(state);
+  await refreshSessionTools(state);
+  await nextRuntime.runner.emit({ type: "session_start", reason });
+}
+
+async function reloadExtensionsForState(
+  state: HarnessSessionState,
+  configuredPaths: string[] = [],
+): Promise<{
+  reloaded: boolean;
+  scheduled: boolean;
+  paths: string[];
+  errors: Array<{ path: string; error: string }>;
+}> {
+  const candidate = await loadAetherExtensions(state.workspaceDirectory, configuredPaths);
+  if (candidate.errors.length > 0) {
+    candidate.runner.invalidate("Extension reload candidate was rejected.");
+    return {
+      reloaded: false,
+      scheduled: false,
+      paths: candidate.paths,
+      errors: candidate.errors,
+    };
+  }
+  if (state.currentRequestId) {
+    state.pendingExtensionRuntime?.runner.invalidate("Superseded by a newer reload.");
+    state.pendingExtensionRuntime = candidate;
+    return {
+      reloaded: false,
+      scheduled: true,
+      paths: candidate.paths,
+      errors: [],
+    };
+  }
+  await activateExtensionRuntime(state, candidate, "reload");
+  return {
+    reloaded: true,
+    scheduled: false,
+    paths: candidate.paths,
+    errors: [],
+  };
+}
+
+async function applyPendingExtensionChanges(state: HarnessSessionState): Promise<void> {
+  const pending = state.pendingExtensionRuntime;
+  if (pending) {
+    state.pendingExtensionRuntime = undefined;
+    await activateExtensionRuntime(state, pending, "reload");
+  } else if (state.pendingToolRefresh || state.pendingActiveToolNames) {
+    const activeToolNames = state.pendingActiveToolNames;
+    state.pendingToolRefresh = false;
+    state.pendingActiveToolNames = undefined;
+    await refreshSessionTools(state, activeToolNames);
+  }
+}
+
 function toolTextOutput(result: AgentToolResult<JsonObject> | undefined): string {
   if (!result) return "";
   return result.content
@@ -1309,6 +1807,8 @@ async function closeHarnessSession(
   if (!state || (expectedState && state !== expectedState)) return false;
   harnessSessions.delete(sessionId);
   rejectPendingHostToolsForSession(sessionId, "Host tool execution ended with the Pi session.");
+  await disposeExtensionRuntime(state, "quit");
+  state.pendingExtensionRuntime?.runner.invalidate("Pi session closed before reload completed.");
   await state.harness.abort().catch((error) => {
     stderr.write(
       `pi-bridge session close failed: ${error instanceof Error ? error.message : String(error)}\n`,
@@ -1353,7 +1853,19 @@ async function createHarnessSession(
   for (const message of history) {
     await session.appendMessage(message);
   }
-  const state = {
+  const extensionRuntime = await loadAetherExtensions(
+    workspaceDirectory,
+    Array.isArray(payload.extension_paths)
+      ? payload.extension_paths.filter((value): value is string => typeof value === "string")
+      : [],
+  );
+  const configuredExtensionPaths = Array.isArray(payload.extension_paths)
+    ? payload.extension_paths.filter((value): value is string => typeof value === "string")
+    : [];
+  for (const message of history) {
+    extensionRuntime.sessionManager.appendMessage(message as never);
+  }
+  const state: HarnessSessionState = {
     sessionId,
     configSignature: modelConfigSignature(config),
     toolSignature: hostToolSignature(payload.host_tools),
@@ -1363,19 +1875,32 @@ async function createHarnessSession(
     credentialStore,
     session,
     harness: undefined as unknown as AgentHarness,
+    hostTools: [],
+    extensionRuntime,
+    configuredExtensionPaths,
+    extensionUnsubscribers: [],
+    pendingToolRefresh: false,
+    pendingActiveToolNames: undefined,
+    currentSignal: undefined,
     systemPrompt: asString(payload.system_prompt),
     currentRequestId: "",
     toolArgsById: new Map<string, unknown>(),
     lastAccessedAt: Date.now(),
-  } satisfies HarnessSessionState;
-  const tools = normalizeHostToolDefinitions(payload.host_tools).map((tool) => createHostTool(state, tool));
+  };
+  state.hostTools = normalizeHostToolDefinitions(payload.host_tools).map((tool) =>
+    createHostTool(state, tool),
+  );
+  const tools = [
+    ...state.hostTools,
+    ...extensionTools(extensionRuntime),
+  ].reduce((toolMap, tool) => toolMap.set(tool.name, tool), new Map<string, AgentTool>());
   const harness = new AgentHarness({
     models,
     env: new NodeExecutionEnv({ cwd: workspaceDirectory }),
     session,
     model,
     systemPrompt: () => state.systemPrompt,
-    tools,
+    tools: [...tools.values()],
     thinkingLevel: thinkingLevelFor(payload),
     streamOptions: harnessStreamOptions(payload, config),
   });
@@ -1386,6 +1911,12 @@ async function createHarnessSession(
     if (asBoolean(details.is_error, false)) return { isError: true };
     return undefined;
   });
+  bindExtensionCore(state);
+  installExtensionHooks(state);
+  harness.subscribe(async (event) => {
+    if (event.type === "settled") await applyPendingExtensionChanges(state);
+  });
+  await extensionRuntime.runner.emit({ type: "session_start", reason: "startup" });
   harnessSessions.set(sessionId, state);
   return state;
 }
@@ -1417,10 +1948,15 @@ async function prepareHarnessSession(
   const reusable = existing;
   reusable.lastAccessedAt = Date.now();
   reusable.systemPrompt = asString(payload.system_prompt);
+  reusable.configuredExtensionPaths = Array.isArray(payload.extension_paths)
+    ? payload.extension_paths.filter((value): value is string => typeof value === "string")
+    : [];
   await reusable.harness.setThinkingLevel(thinkingLevelFor(payload) ?? "off");
   await reusable.harness.setStreamOptions(harnessStreamOptions(payload, config));
-  const tools = normalizeHostToolDefinitions(payload.host_tools).map((tool) => createHostTool(reusable, tool));
-  await reusable.harness.setTools(tools);
+  reusable.hostTools = normalizeHostToolDefinitions(payload.host_tools).map((tool) =>
+    createHostTool(reusable, tool),
+  );
+  await refreshSessionTools(reusable);
   return { state: reusable, reused: true };
 }
 
@@ -1693,6 +2229,142 @@ async function closeHarnessSessionRequest(payload: JsonObject): Promise<JsonObje
   return { closed: await closeHarnessSession(sessionId) };
 }
 
+function extensionRuntimePayload(state: HarnessSessionState): JsonObject {
+  const runner = state.extensionRuntime.runner;
+  return {
+    session_id: state.sessionId,
+    workspace_directory: state.workspaceDirectory,
+    extension_paths: runner.getExtensionPaths(),
+    discovered_paths: state.extensionRuntime.paths,
+    errors: state.extensionRuntime.errors,
+    tools: runner.getAllRegisteredTools().map((tool) => ({
+      name: tool.definition.name,
+      description: tool.definition.description,
+      source_path: tool.sourceInfo.path,
+    })),
+    commands: runner.getRegisteredCommands().map((command) => ({
+      name: command.invocationName,
+      description: command.description ?? "",
+      source_path: command.sourceInfo.path,
+    })),
+    pending_reload: Boolean(state.pendingExtensionRuntime),
+    ui_mode: "print",
+    custom_tui_supported: false,
+  };
+}
+
+function extensionSessionFromPayload(payload: JsonObject): HarnessSessionState {
+  const sessionId = asString(payload.session_id).trim();
+  if (!sessionId) throw new Error("session_id is required for Pi extension operations.");
+  const state = harnessSessions.get(sessionId);
+  if (!state) throw new Error(`Unknown Pi session: ${sessionId}`);
+  return state;
+}
+
+async function listExtensions(payload: JsonObject): Promise<JsonObject> {
+  await pruneHarnessSessions();
+  return extensionRuntimePayload(extensionSessionFromPayload(payload));
+}
+
+async function reloadExtensions(payload: JsonObject): Promise<JsonObject> {
+  await pruneHarnessSessions();
+  const state = extensionSessionFromPayload(payload);
+  const configuredPaths = Array.isArray(payload.extension_paths)
+    ? payload.extension_paths.filter((value): value is string => typeof value === "string")
+    : [];
+  const result = await reloadExtensionsForState(state, configuredPaths);
+  return {
+    ...extensionRuntimePayload(state),
+    ...result,
+  };
+}
+
+async function invokeExtensionCommand(payload: JsonObject): Promise<JsonObject> {
+  await pruneHarnessSessions();
+  const state = extensionSessionFromPayload(payload);
+  const commandName = asString(payload.command).trim().replace(/^\//, "");
+  if (!commandName) throw new Error("command is required for Pi extension command invocation.");
+  const command = state.extensionRuntime.runner.getCommand(commandName);
+  if (!command) throw new Error(`Unknown Pi extension command: ${commandName}`);
+  const context = state.extensionRuntime.runner.createCommandContext() as ExtensionCommandContext;
+  await command.handler(asString(payload.args), context);
+  return {
+    invoked: true,
+    command: commandName,
+    pending_reload: Boolean(state.pendingExtensionRuntime),
+  };
+}
+
+async function installedExtensionPackagesPayload(): Promise<JsonObject> {
+  return {
+    packages: (await listAetherExtensionPackages(process.cwd())).map((installedPackage) => ({
+      source: installedPackage.source,
+      scope: installedPackage.scope,
+      filtered: installedPackage.filtered,
+      installed_path: installedPackage.installedPath ?? "",
+      name: installedPackage.name,
+      version: installedPackage.version,
+      description: installedPackage.description,
+      extension_count: installedPackage.extensionCount,
+      skill_count: installedPackage.skillCount,
+      prompt_count: installedPackage.promptCount,
+      theme_count: installedPackage.themeCount,
+      skill_paths: installedPackage.skillPaths,
+    })),
+  };
+}
+
+async function reloadAllExtensionSessions(): Promise<JsonObject> {
+  const results: JsonObject[] = [];
+  for (const state of harnessSessions.values()) {
+    const result = await reloadExtensionsForState(
+      state,
+      state.configuredExtensionPaths,
+    );
+    results.push({
+      session_id: state.sessionId,
+      ...result,
+    });
+  }
+  return {
+    session_count: results.length,
+    sessions: results,
+  };
+}
+
+async function installExtensionPackage(payload: JsonObject): Promise<JsonObject> {
+  const source = asString(payload.source).trim();
+  await installAetherExtensionPackage(process.cwd(), source);
+  return {
+    installed: true,
+    source,
+    ...(await installedExtensionPackagesPayload()),
+    reload: await reloadAllExtensionSessions(),
+  };
+}
+
+async function removeExtensionPackage(payload: JsonObject): Promise<JsonObject> {
+  const source = asString(payload.source).trim();
+  const removed = await removeAetherExtensionPackage(process.cwd(), source);
+  return {
+    removed,
+    source,
+    ...(await installedExtensionPackagesPayload()),
+    reload: removed ? await reloadAllExtensionSessions() : { session_count: 0, sessions: [] },
+  };
+}
+
+async function updateExtensionPackage(payload: JsonObject): Promise<JsonObject> {
+  const source = asString(payload.source).trim();
+  await updateAetherExtensionPackage(process.cwd(), source);
+  return {
+    updated: true,
+    source,
+    ...(await installedExtensionPackagesPayload()),
+    reload: await reloadAllExtensionSessions(),
+  };
+}
+
 async function abortBridgeTarget(payload: JsonObject): Promise<JsonObject> {
   const targetId = asString(payload.request_id, asString(payload.target_id)).trim();
   const sessionId = asString(payload.session_id).trim();
@@ -1734,6 +2406,7 @@ async function handleRequest(request: BridgeRequest): Promise<void> {
         bridge_version: BRIDGE_VERSION,
         pi_ai_version: PI_AI_VERSION,
         pi_agent_core_version: PI_AGENT_CORE_VERSION,
+        pi_coding_agent_version: PI_CODING_AGENT_VERSION,
         node_version: process.version,
       });
       return;
@@ -1761,6 +2434,30 @@ async function handleRequest(request: BridgeRequest): Promise<void> {
       return;
     case "close_session":
       writeResponse(id, await closeHarnessSessionRequest(payload));
+      return;
+    case "list_extensions":
+      writeResponse(id, await listExtensions(payload));
+      return;
+    case "reload_extensions":
+      writeResponse(id, await reloadExtensions(payload));
+      return;
+    case "invoke_extension_command":
+      writeResponse(id, await invokeExtensionCommand(payload));
+      return;
+    case "list_extension_packages":
+      writeResponse(id, await installedExtensionPackagesPayload());
+      return;
+    case "install_extension_package":
+      writeResponse(id, await installExtensionPackage(payload));
+      return;
+    case "remove_extension_package":
+      writeResponse(id, await removeExtensionPackage(payload));
+      return;
+    case "update_extension_package":
+      writeResponse(id, await updateExtensionPackage(payload));
+      return;
+    case "reload_all_extensions":
+      writeResponse(id, await reloadAllExtensionSessions());
       return;
     case "steer":
       writeResponse(id, await steerHarnessSession(payload));
@@ -1792,6 +2489,7 @@ async function main(): Promise<void> {
         bridge_version: BRIDGE_VERSION,
         pi_ai_version: PI_AI_VERSION,
         pi_agent_core_version: PI_AGENT_CORE_VERSION,
+        pi_coding_agent_version: PI_CODING_AGENT_VERSION,
         node_version: process.version,
       },
     });

@@ -34,6 +34,7 @@ private const val PiBridgeNodeMinVersion = "22.19.0"
 private const val PiBridgeVersion = "2.0.0-alpha.0"
 private const val PiAiVersion = "0.80.6"
 private const val PiAgentCoreVersion = "0.80.6"
+private const val PiCodingAgentVersion = "0.80.6"
 private const val PiBridgeRequestTimeoutMillis = 10 * 60 * 1000L
 private const val PiBridgeOAuthTimeoutMillis = 15 * 60 * 1000L
 private const val PiBridgePingTimeoutMillis = 15_000L
@@ -177,6 +178,75 @@ class PiKernelBridge(
             timeoutMillis = PiBridgePingTimeoutMillis,
             abortOnCancellation = false,
             startIfNeeded = false,
+        )
+
+    suspend fun listExtensions(sessionId: String): JSONObject =
+        request(
+            type = "list_extensions",
+            payload = JSONObject().put("session_id", sessionId),
+            timeoutMillis = PiBridgePingTimeoutMillis,
+            abortOnCancellation = false,
+        )
+
+    suspend fun reloadExtensions(sessionId: String): JSONObject =
+        request(
+            type = "reload_extensions",
+            payload = JSONObject().put("session_id", sessionId),
+            timeoutMillis = PiBridgeRequestTimeoutMillis,
+            abortOnCancellation = false,
+        )
+
+    suspend fun invokeExtensionCommand(
+        sessionId: String,
+        command: String,
+        args: String = "",
+    ): JSONObject =
+        request(
+            type = "invoke_extension_command",
+            payload = JSONObject()
+                .put("session_id", sessionId)
+                .put("command", command)
+                .put("args", args),
+            timeoutMillis = PiBridgeRequestTimeoutMillis,
+            abortOnCancellation = false,
+        )
+
+    suspend fun listExtensionPackages(): JSONObject =
+        request(
+            type = "list_extension_packages",
+            timeoutMillis = PiBridgeRequestTimeoutMillis,
+            abortOnCancellation = false,
+        )
+
+    suspend fun installExtensionPackage(source: String): JSONObject =
+        request(
+            type = "install_extension_package",
+            payload = JSONObject().put("source", source),
+            timeoutMillis = PiBridgeRequestTimeoutMillis,
+            abortOnCancellation = false,
+        )
+
+    suspend fun removeExtensionPackage(source: String): JSONObject =
+        request(
+            type = "remove_extension_package",
+            payload = JSONObject().put("source", source),
+            timeoutMillis = PiBridgeRequestTimeoutMillis,
+            abortOnCancellation = false,
+        )
+
+    suspend fun updateExtensionPackage(source: String): JSONObject =
+        request(
+            type = "update_extension_package",
+            payload = JSONObject().put("source", source),
+            timeoutMillis = PiBridgeRequestTimeoutMillis,
+            abortOnCancellation = false,
+        )
+
+    suspend fun reloadAllExtensions(): JSONObject =
+        request(
+            type = "reload_all_extensions",
+            timeoutMillis = PiBridgeRequestTimeoutMillis,
+            abortOnCancellation = false,
         )
 
     suspend fun sendHostToolResult(payload: JSONObject) {
@@ -378,6 +448,7 @@ class PiKernelBridge(
                     "bridge_version" to PiBridgeVersion,
                     "pi_ai_version" to PiAiVersion,
                     "pi_agent_core_version" to PiAgentCoreVersion,
+                    "pi_coding_agent_version" to PiCodingAgentVersion,
                     "node_version" to (readNodeVersion() ?: "unknown"),
                     "process_generation" to startedProcess.generation,
                 ),

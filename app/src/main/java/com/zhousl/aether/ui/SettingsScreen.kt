@@ -57,6 +57,7 @@ import androidx.compose.material.icons.rounded.DarkMode
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Extension
+import androidx.compose.material.icons.rounded.FileUpload
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Link
@@ -65,6 +66,7 @@ import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Terminal
+import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material.icons.rounded.WbSunny
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -109,6 +111,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.res.stringResource
@@ -143,6 +146,11 @@ import com.zhousl.aether.data.LlmProviderConfig
 import com.zhousl.aether.data.PiProviderCatalog
 import com.zhousl.aether.data.LocalRuntimeId
 import com.zhousl.aether.data.McpServerTestOperation
+import com.zhousl.aether.data.InstalledPiExtension
+import com.zhousl.aether.data.PiExtensionCatalogEntry
+import com.zhousl.aether.data.PiExtensionInstallKind
+import com.zhousl.aether.data.PiPackageCompatibilityIssue
+import com.zhousl.aether.data.PiPackageDetails
 import com.zhousl.aether.data.PackageProfileState
 import com.zhousl.aether.data.ProviderModelOption
 import com.zhousl.aether.data.RootSetupIssue
@@ -199,6 +207,8 @@ private enum class SettingsPage {
     Reliability,
     Skills,
     AddSkill,
+    Extensions,
+    PackageDetail,
     McpServers,
     AddMcpServer,
     EditMcpServer,
@@ -226,6 +236,7 @@ private fun SettingsPage.depth(): Int = when (this) {
     SettingsPage.WebTools,
     SettingsPage.Reliability,
     SettingsPage.Skills,
+    SettingsPage.Extensions,
     SettingsPage.McpServers,
     SettingsPage.ScheduledTasks,
     SettingsPage.Termux,
@@ -239,6 +250,7 @@ private fun SettingsPage.depth(): Int = when (this) {
     SettingsPage.AddProvider,
     SettingsPage.EditProvider,
     SettingsPage.AddSkill,
+    SettingsPage.PackageDetail,
     SettingsPage.AddMcpServer,
     SettingsPage.EditMcpServer,
     SettingsPage.AddScheduledTask,
@@ -414,6 +426,15 @@ fun SettingsScreen(
     alpinePackageProfiles: Map<String, PackageProfileState>,
     developerTermuxReadyOverride: Boolean?,
     installedSkills: List<com.zhousl.aether.data.InstalledSkill>,
+    installedPiExtensions: List<InstalledPiExtension>,
+    piExtensionCatalog: List<PiExtensionCatalogEntry>,
+    isLoadingPiExtensions: Boolean,
+    piExtensionCatalogError: String,
+    piExtensionOperationSource: String,
+    selectedPiPackageDetails: PiPackageDetails?,
+    selectedPiPackageSource: String,
+    isLoadingPiPackageDetails: Boolean,
+    piPackageDetailsError: String,
     mcpServers: List<com.zhousl.aether.data.McpServerConfig>,
     isFetchingModels: Boolean,
     providerAuthState: PiProviderAuthState,
@@ -453,6 +474,12 @@ fun SettingsScreen(
     onInstallSkillUrl: (String, (Boolean) -> Unit) -> Unit,
     onToggleSkillEnabled: (String, Boolean) -> Unit,
     onRemoveSkill: (String) -> Unit,
+    onRefreshPiExtensions: () -> Unit,
+    onInstallPiExtensionPackage: (String) -> Unit,
+    onLoadPiPackageDetails: (PiExtensionCatalogEntry) -> Unit,
+    onUpdatePiExtensionPackage: (String) -> Unit,
+    onRemovePiExtension: (InstalledPiExtension) -> Unit,
+    onImportPiExtension: () -> Unit,
     onSaveHttpMcpServer: (String?, String, String, String) -> Unit,
     onSaveStdIoMcpServer: (String?, String, String, String, String, String, LocalRuntimeId?) -> Unit,
     onToggleMcpServerEnabled: (String, Boolean) -> Unit,
@@ -668,6 +695,7 @@ fun SettingsScreen(
     var currentPage by rememberSaveable { mutableStateOf(SettingsPage.Hub.name) }
     val page = SettingsPage.valueOf(currentPage)
     var rootSetupReturnPage by rememberSaveable { mutableStateOf(SettingsPage.Termux.name) }
+    var selectedPiPackageSourceValue by rememberSaveable { mutableStateOf("") }
 
     fun rootSetupReturnPageValue(): SettingsPage =
         runCatching { SettingsPage.valueOf(rootSetupReturnPage) }
@@ -703,6 +731,7 @@ fun SettingsScreen(
         SettingsPage.DefaultCompactingModel -> SettingsPage.DefaultModels
         SettingsPage.AddProvider, SettingsPage.EditProvider -> SettingsPage.Providers
         SettingsPage.AddSkill -> SettingsPage.Skills
+        SettingsPage.PackageDetail -> SettingsPage.Extensions
         SettingsPage.AddMcpServer, SettingsPage.EditMcpServer -> SettingsPage.McpServers
         SettingsPage.AddScheduledTask, SettingsPage.EditScheduledTask -> SettingsPage.ScheduledTasks
         SettingsPage.AlpineTerminal -> SettingsPage.Alpine
@@ -775,6 +804,7 @@ fun SettingsScreen(
                 defaultRuntimeId = defaultRuntimeId,
                 showRuntimeDefaults = termuxSetupState.isReady && alpineSetupState.isReady,
                 skillCount = installedSkills.size,
+                piExtensionCount = installedPiExtensions.size,
                 mcpServerCount = mcpServers.size,
                 scheduledTaskCount = scheduledTasks.size,
                 statisticsSummary = buildSettingsStatisticsSummary(usageStatisticsSnapshots),
@@ -982,6 +1012,62 @@ fun SettingsScreen(
                 },
                 onBack = { currentPage = SettingsPage.Skills.name },
             )
+
+            SettingsPage.Extensions -> PiExtensionsPage(
+                installedExtensions = installedPiExtensions,
+                catalog = piExtensionCatalog,
+                isLoading = isLoadingPiExtensions,
+                catalogError = piExtensionCatalogError,
+                operationSource = piExtensionOperationSource,
+                onRefresh = onRefreshPiExtensions,
+                onUpdate = onUpdatePiExtensionPackage,
+                onRemove = onRemovePiExtension,
+                onImport = onImportPiExtension,
+                onSelectPackage = { entry ->
+                    selectedPiPackageSourceValue = entry.source
+                    onLoadPiPackageDetails(entry)
+                    currentPage = SettingsPage.PackageDetail.name
+                },
+                onBack = { currentPage = SettingsPage.Hub.name },
+            )
+
+            SettingsPage.PackageDetail -> {
+                val entry = piExtensionCatalog.firstOrNull {
+                    it.source == selectedPiPackageSourceValue
+                }
+                if (entry == null) {
+                    LaunchedEffect(Unit) {
+                        currentPage = SettingsPage.Extensions.name
+                    }
+                } else {
+                    LaunchedEffect(entry.source) {
+                        if (
+                            selectedPiPackageSource != entry.source ||
+                            (
+                                selectedPiPackageDetails == null &&
+                                    !isLoadingPiPackageDetails &&
+                                    piPackageDetailsError.isBlank()
+                                )
+                        ) {
+                            onLoadPiPackageDetails(entry)
+                        }
+                    }
+                    PiPackageDetailPage(
+                        entry = entry,
+                        details = selectedPiPackageDetails
+                            ?.takeIf { selectedPiPackageSource == entry.source },
+                        installed = installedPiExtensions.any {
+                            it.kind == PiExtensionInstallKind.Package && it.source == entry.source
+                        },
+                        isLoading = isLoadingPiPackageDetails,
+                        error = piPackageDetailsError,
+                        isOperating = piExtensionOperationSource == entry.source,
+                        onRetry = { onLoadPiPackageDetails(entry) },
+                        onInstall = { onInstallPiExtensionPackage(entry.source) },
+                        onBack = { currentPage = SettingsPage.Extensions.name },
+                    )
+                }
+            }
 
             SettingsPage.McpServers -> McpServersListPage(
                 title = stringResource(R.string.settings_mcp_servers),
@@ -1193,6 +1279,7 @@ private fun SettingsHub(
     defaultRuntimeId: LocalRuntimeId?,
     showRuntimeDefaults: Boolean,
     skillCount: Int,
+    piExtensionCount: Int,
     mcpServerCount: Int,
     scheduledTaskCount: Int,
     statisticsSummary: String,
@@ -1283,6 +1370,16 @@ private fun SettingsHub(
                     title = stringResource(R.string.settings_agent_skills),
                     subtitle = stringResource(R.string.settings_skills_count_configured, skillCount),
                     onClick = { onNavigate(SettingsPage.Skills) },
+                )
+                CardDivider()
+                SettingsNavRow(
+                    iconPainter = painterResource(R.drawable.pi_logo_on_light),
+                    title = stringResource(R.string.settings_pi_extensions),
+                    subtitle = stringResource(
+                        R.string.settings_pi_extensions_count_configured,
+                        piExtensionCount,
+                    ),
+                    onClick = { onNavigate(SettingsPage.Extensions) },
                 )
                 CardDivider()
                 SettingsNavRow(
@@ -3177,6 +3274,718 @@ private fun AddSkillPage(
             }
         }
     }
+}
+
+@Composable
+private fun PiExtensionsPage(
+    installedExtensions: List<InstalledPiExtension>,
+    catalog: List<PiExtensionCatalogEntry>,
+    isLoading: Boolean,
+    catalogError: String,
+    operationSource: String,
+    onRefresh: () -> Unit,
+    onUpdate: (String) -> Unit,
+    onRemove: (InstalledPiExtension) -> Unit,
+    onImport: () -> Unit,
+    onSelectPackage: (PiExtensionCatalogEntry) -> Unit,
+    onBack: () -> Unit,
+) {
+    var selectedTab by rememberSaveable { mutableIntStateOf(0) }
+    var searchValue by rememberSaveable(stateSaver = TextFieldValue.Saver) {
+        mutableStateOf(TextFieldValue(""))
+    }
+    LaunchedEffect(Unit) {
+        onRefresh()
+    }
+    val installedSources = installedExtensions
+        .filter { it.kind == PiExtensionInstallKind.Package }
+        .map { it.source }
+        .toSet()
+    val query = searchValue.text.trim()
+    val visibleCatalog = catalog
+        .asSequence()
+        .filter { entry ->
+            query.isBlank() || listOf(
+                entry.name,
+                entry.description,
+                entry.author,
+                entry.source,
+            ).any { it.contains(query, ignoreCase = true) }
+        }
+        .take(40)
+        .toList()
+
+    SubPageScaffold(
+        title = stringResource(R.string.settings_pi_extensions),
+        onBack = onBack,
+        trailingIcon = Icons.Rounded.FileUpload,
+        trailingEnabled = operationSource.isBlank(),
+        trailingContentDescription = stringResource(R.string.settings_import_extension),
+        onTrailingAction = onImport,
+    ) {
+        Text(
+            text = stringResource(R.string.settings_pi_extensions_warning),
+            style = MaterialTheme.typography.bodySmall,
+            color = AetherOnSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 4.dp),
+        )
+
+        Spacer(Modifier.height(16.dp))
+
+        val tabs = listOf(
+            stringResource(R.string.settings_extension_discover),
+            stringResource(R.string.settings_extension_installed),
+        )
+        SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+            tabs.forEachIndexed { index, label ->
+                SegmentedButton(
+                    shape = SegmentedButtonDefaults.itemShape(index = index, count = tabs.size),
+                    onClick = { selectedTab = index },
+                    selected = selectedTab == index,
+                    colors = SegmentedButtonDefaults.colors(
+                        activeContainerColor = AetherPrimary,
+                        activeContentColor = AetherOnPrimary,
+                        inactiveContainerColor = AetherSurfaceHigh,
+                        inactiveContentColor = AetherOnSurface,
+                    ),
+                ) {
+                    Text(label)
+                }
+            }
+        }
+
+        Spacer(Modifier.height(18.dp))
+
+        when (selectedTab) {
+            0 -> {
+                SettingsCardGroup {
+                    ChatGptTextField(
+                        label = stringResource(R.string.settings_search_extensions),
+                        value = searchValue,
+                        onValueChange = { searchValue = it },
+                    )
+                }
+                Spacer(Modifier.height(14.dp))
+
+                when {
+                    isLoading && catalog.isEmpty() -> {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 32.dp),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(22.dp),
+                                strokeWidth = 2.dp,
+                                color = AetherPrimary,
+                            )
+                            Spacer(Modifier.width(12.dp))
+                            Text(
+                                stringResource(R.string.settings_loading_extensions),
+                                color = AetherOnSurfaceVariant,
+                            )
+                        }
+                    }
+
+                    catalogError.isNotBlank() && catalog.isEmpty() -> {
+                        SettingsCardGroup {
+                            Column(modifier = Modifier.padding(18.dp)) {
+                                Text(
+                                    text = catalogError,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = AetherOnSurfaceVariant,
+                                )
+                                Spacer(Modifier.height(14.dp))
+                                SettingsActionButton(
+                                    label = stringResource(R.string.action_retry),
+                                    onClick = onRefresh,
+                                )
+                            }
+                        }
+                    }
+
+                    visibleCatalog.isEmpty() -> {
+                        Text(
+                            text = stringResource(R.string.settings_no_extensions_found),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = AetherOnSurfaceVariant,
+                            modifier = Modifier.padding(vertical = 24.dp, horizontal = 4.dp),
+                        )
+                    }
+
+                    else -> visibleCatalog.forEach { entry ->
+                        PiExtensionCatalogCard(
+                            entry = entry,
+                            installed = installedSources.contains(entry.source),
+                            onClick = { onSelectPackage(entry) },
+                        )
+                        Spacer(Modifier.height(10.dp))
+                    }
+                }
+            }
+
+            else -> {
+                if (installedExtensions.isEmpty()) {
+                    SettingsCardGroup {
+                        Column(
+                            modifier = Modifier.fillMaxWidth().padding(24.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                        ) {
+                            Text(
+                                stringResource(R.string.settings_no_extensions_installed),
+                                style = MaterialTheme.typography.titleMedium,
+                                color = AetherOnSurface,
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                stringResource(R.string.settings_install_or_import_extension),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = AetherOnSurfaceVariant,
+                            )
+                            Spacer(Modifier.height(16.dp))
+                            SettingsActionButton(
+                                label = stringResource(R.string.settings_import_extension),
+                                onClick = onImport,
+                                enabled = operationSource.isBlank(),
+                            )
+                        }
+                    }
+                } else {
+                    installedExtensions.forEach { extension ->
+                        InstalledPiExtensionCard(
+                            extension = extension,
+                            isOperating = operationSource == extension.id ||
+                                operationSource == extension.source,
+                            actionsEnabled = operationSource.isBlank(),
+                            onUpdate = { onUpdate(extension.source) },
+                            onRemove = { onRemove(extension) },
+                        )
+                        Spacer(Modifier.height(10.dp))
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PiExtensionCatalogCard(
+    entry: PiExtensionCatalogEntry,
+    installed: Boolean,
+    onClick: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(AetherSurfaceHigh)
+            .clickable(onClick = onClick)
+            .padding(16.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.Top,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = entry.name,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = AetherOnSurface,
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = buildString {
+                        if (entry.author.isNotBlank()) append(entry.author)
+                        if (entry.author.isNotBlank() && entry.monthlyDownloads > 0) append(" · ")
+                        if (entry.monthlyDownloads > 0) {
+                            append(formatExtensionDownloads(entry.monthlyDownloads))
+                            append("/mo")
+                        }
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = AetherOnSurfaceVariant,
+                )
+            }
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (entry.compatibilityIssue != null) {
+                    Icon(
+                        imageVector = Icons.Rounded.WarningAmber,
+                        contentDescription = stringResource(R.string.settings_package_may_be_incompatible),
+                        tint = Color(0xFFFFB020),
+                        modifier = Modifier.size(22.dp),
+                    )
+                }
+                if (installed) {
+                    ActionPreviewPill(
+                        label = stringResource(R.string.settings_extension_installed),
+                    )
+                }
+            }
+        }
+        if (entry.description.isNotBlank()) {
+            Spacer(Modifier.height(10.dp))
+            Text(
+                text = entry.description,
+                style = MaterialTheme.typography.bodyMedium,
+                color = AetherOnSurfaceVariant,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Spacer(Modifier.height(10.dp))
+        Text(
+            text = entry.source,
+            style = MaterialTheme.typography.labelMedium,
+            color = AetherOnSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun PiPackageDetailPage(
+    entry: PiExtensionCatalogEntry,
+    details: PiPackageDetails?,
+    installed: Boolean,
+    isLoading: Boolean,
+    error: String,
+    isOperating: Boolean,
+    onRetry: () -> Unit,
+    onInstall: () -> Unit,
+    onBack: () -> Unit,
+) {
+    val uriHandler = LocalUriHandler.current
+    val compatibilityIssue = details?.compatibilityIssue ?: entry.compatibilityIssue
+    var showInstallWarning by rememberSaveable(entry.source) { mutableStateOf(false) }
+
+    if (showInstallWarning && compatibilityIssue != null) {
+        PiPackageInstallWarningDialog(
+            packageName = entry.name,
+            warning = piPackageCompatibilityMessage(compatibilityIssue),
+            onDismiss = { showInstallWarning = false },
+            onContinue = {
+                showInstallWarning = false
+                onInstall()
+            },
+        )
+    }
+
+    SubPageScaffold(
+        title = entry.name,
+        onBack = onBack,
+    ) {
+        when {
+            isLoading && details == null -> {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(24.dp),
+                        strokeWidth = 2.dp,
+                        color = AetherPrimary,
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Text(
+                        text = stringResource(R.string.settings_loading_package_details),
+                        color = AetherOnSurfaceVariant,
+                    )
+                }
+            }
+
+            details == null -> {
+                SettingsCardGroup {
+                    Column(modifier = Modifier.padding(18.dp)) {
+                        Text(
+                            text = error.ifBlank {
+                                stringResource(R.string.settings_package_details_unavailable)
+                            },
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = AetherOnSurfaceVariant,
+                        )
+                        Spacer(Modifier.height(14.dp))
+                        SettingsActionButton(
+                            label = stringResource(R.string.action_retry),
+                            onClick = onRetry,
+                        )
+                        if (!installed) {
+                            Spacer(Modifier.height(10.dp))
+                            if (isOperating) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(22.dp),
+                                    strokeWidth = 2.dp,
+                                    color = AetherPrimary,
+                                )
+                            } else {
+                                SettingsActionButton(
+                                    label = stringResource(R.string.settings_install_package),
+                                    onClick = {
+                                        if (compatibilityIssue == null) {
+                                            onInstall()
+                                        } else {
+                                            showInstallWarning = true
+                                        }
+                                    },
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            else -> {
+                Text(
+                    text = details.name,
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = AetherOnSurface,
+                )
+                if (details.description.isNotBlank()) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = details.description,
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = AetherOnSurfaceVariant,
+                    )
+                }
+
+                if (compatibilityIssue != null) {
+                    Spacer(Modifier.height(16.dp))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color(0xFFFFB020).copy(alpha = 0.14f))
+                            .padding(14.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.Top,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.WarningAmber,
+                            contentDescription = null,
+                            tint = Color(0xFFFFB020),
+                            modifier = Modifier.size(22.dp),
+                        )
+                        Text(
+                            text = piPackageCompatibilityMessage(compatibilityIssue),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = AetherOnSurface,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(18.dp))
+                when {
+                    isOperating -> {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(22.dp),
+                                strokeWidth = 2.dp,
+                                color = AetherPrimary,
+                            )
+                            Spacer(Modifier.width(10.dp))
+                            Text(
+                                text = stringResource(R.string.settings_installing),
+                                color = AetherOnSurfaceVariant,
+                            )
+                        }
+                    }
+
+                    installed -> {
+                        ActionPreviewPill(
+                            label = stringResource(R.string.settings_extension_installed),
+                        )
+                    }
+
+                    else -> {
+                        SettingsActionButton(
+                            label = stringResource(R.string.settings_install_package),
+                            onClick = {
+                                if (compatibilityIssue == null) {
+                                    onInstall()
+                                } else {
+                                    showInstallWarning = true
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(20.dp))
+                SettingsCardGroup {
+                    Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
+                        PackageDetailLine(stringResource(R.string.settings_package_source), details.source)
+                        PackageDetailLine(stringResource(R.string.settings_package_version), details.version)
+                        PackageDetailLine(stringResource(R.string.settings_package_published), details.published)
+                        PackageDetailLine(stringResource(R.string.settings_package_downloads), details.downloads)
+                        PackageDetailLine(stringResource(R.string.settings_package_author), details.author)
+                        PackageDetailLine(stringResource(R.string.settings_package_license), details.license)
+                        PackageDetailLine(stringResource(R.string.settings_package_types), details.types.joinToString(", "))
+                        PackageDetailLine(stringResource(R.string.settings_package_size), details.size)
+                        PackageDetailLine(stringResource(R.string.settings_package_dependencies), details.dependencies)
+                    }
+                }
+
+                val links = listOf(
+                    stringResource(R.string.settings_package_npm) to details.npmUrl,
+                    stringResource(R.string.settings_package_repository) to details.repositoryUrl,
+                ).filter { it.second.isNotBlank() }
+                if (links.isNotEmpty()) {
+                    Spacer(Modifier.height(14.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        links.forEach { (label, url) ->
+                            SmallChipButton(
+                                label = label,
+                                onClick = { runCatching { uriHandler.openUri(url) } },
+                            )
+                        }
+                    }
+                }
+
+                if (details.readmeMarkdown.isNotBlank()) {
+                    Spacer(Modifier.height(24.dp))
+                    Text(
+                        text = stringResource(R.string.settings_package_readme),
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = AetherOnSurface,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    MarkdownContent(
+                        markdown = details.readmeMarkdown,
+                        onLinkClick = { url -> runCatching { uriHandler.openUri(url) } },
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PackageDetailLine(
+    label: String,
+    value: String,
+) {
+    if (value.isBlank()) return
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 7.dp),
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodySmall,
+            color = AetherOnSurfaceVariant,
+            modifier = Modifier.width(96.dp),
+        )
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodyMedium,
+            color = AetherOnSurface,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+@Composable
+private fun piPackageCompatibilityMessage(
+    issue: PiPackageCompatibilityIssue,
+): String = when (issue) {
+    PiPackageCompatibilityIssue.InteractiveUi ->
+        stringResource(R.string.settings_package_incompatible_interactive_ui)
+    PiPackageCompatibilityIssue.Theme ->
+        stringResource(R.string.settings_package_incompatible_theme)
+    PiPackageCompatibilityIssue.Prompt ->
+        stringResource(R.string.settings_package_incompatible_prompt)
+    PiPackageCompatibilityIssue.Platform ->
+        stringResource(R.string.settings_package_incompatible_platform)
+}
+
+@Composable
+private fun PiPackageInstallWarningDialog(
+    packageName: String,
+    warning: String,
+    onDismiss: () -> Unit,
+    onContinue: () -> Unit,
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 18.dp)
+                .shadow(22.dp, RoundedCornerShape(28.dp), ambientColor = AetherScrim, spotColor = AetherScrim)
+                .clip(RoundedCornerShape(28.dp))
+                .background(AetherSurfaceHigh)
+                .padding(20.dp),
+        ) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.WarningAmber,
+                    contentDescription = null,
+                    tint = Color(0xFFFFB020),
+                    modifier = Modifier.size(24.dp),
+                )
+                Text(
+                    text = stringResource(R.string.settings_package_install_warning_title),
+                    style = MaterialTheme.typography.titleMedium,
+                    color = AetherOnSurface,
+                )
+            }
+            Spacer(Modifier.height(10.dp))
+            Text(
+                text = stringResource(
+                    R.string.settings_package_install_warning_body,
+                    packageName,
+                    warning,
+                ),
+                style = MaterialTheme.typography.bodyMedium,
+                color = AetherOnSurfaceVariant,
+            )
+            Spacer(Modifier.height(18.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                SettingsSubtleActionButton(
+                    label = stringResource(R.string.action_cancel),
+                    onClick = onDismiss,
+                    modifier = Modifier.weight(1f),
+                )
+                SettingsActionButton(
+                    label = stringResource(R.string.settings_install_anyway),
+                    onClick = onContinue,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun InstalledPiExtensionCard(
+    extension: InstalledPiExtension,
+    isOperating: Boolean,
+    actionsEnabled: Boolean,
+    onUpdate: () -> Unit,
+    onRemove: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(AetherSurfaceHigh)
+            .padding(16.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.Top,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = extension.name,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = AetherOnSurface,
+                )
+                if (extension.version.isNotBlank()) {
+                    Spacer(Modifier.height(3.dp))
+                    Text(
+                        text = "v${extension.version}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = AetherOnSurfaceVariant,
+                    )
+                }
+            }
+            if (isOperating) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(22.dp),
+                    strokeWidth = 2.dp,
+                    color = AetherPrimary,
+                )
+            }
+        }
+        if (extension.description.isNotBlank()) {
+            Spacer(Modifier.height(10.dp))
+            Text(
+                text = extension.description,
+                style = MaterialTheme.typography.bodyMedium,
+                color = AetherOnSurfaceVariant,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        if (extension.kind == PiExtensionInstallKind.Package) {
+            val extensionLabel = if (extension.extensionCount > 0) {
+                stringResource(R.string.settings_package_extensions_count, extension.extensionCount)
+            } else null
+            val skillLabel = if (extension.skillCount > 0) {
+                stringResource(R.string.settings_package_skills_count, extension.skillCount)
+            } else null
+            val promptLabel = if (extension.promptCount > 0) {
+                stringResource(R.string.settings_package_prompts_count, extension.promptCount)
+            } else null
+            val themeLabel = if (extension.themeCount > 0) {
+                stringResource(R.string.settings_package_themes_count, extension.themeCount)
+            } else null
+            val resources = listOfNotNull(extensionLabel, skillLabel, promptLabel, themeLabel)
+            if (resources.isNotEmpty()) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = resources.joinToString(" · "),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = AetherOnSurfaceVariant,
+                )
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        Text(
+            text = extension.source,
+            style = MaterialTheme.typography.labelMedium,
+            color = AetherOnSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        if (!isOperating) {
+            Spacer(Modifier.height(12.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (extension.kind == PiExtensionInstallKind.Package) {
+                    SmallChipButton(
+                        label = stringResource(R.string.settings_update),
+                        onClick = onUpdate,
+                        enabled = actionsEnabled,
+                    )
+                }
+                SmallChipButton(
+                    label = stringResource(R.string.action_remove),
+                    onClick = onRemove,
+                    isDestructive = true,
+                    enabled = actionsEnabled,
+                )
+            }
+        }
+    }
+}
+
+private fun formatExtensionDownloads(downloads: Long): String = when {
+    downloads >= 1_000_000 -> String.format(Locale.US, "%.1fM", downloads / 1_000_000.0)
+    downloads >= 1_000 -> String.format(Locale.US, "%.1fK", downloads / 1_000.0)
+    else -> downloads.toString()
 }
 
 // -----------------------------------------------------------------------------

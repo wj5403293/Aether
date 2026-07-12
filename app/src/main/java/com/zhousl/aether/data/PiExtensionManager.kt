@@ -1,0 +1,748 @@
+package com.zhousl.aether.data
+
+import android.content.Context
+import android.net.Uri
+import android.provider.OpenableColumns
+import com.vladsch.flexmark.html2md.converter.FlexmarkHtmlConverter
+import com.zhousl.aether.data.pi.PiKernelBridge
+import com.zhousl.aether.runtime.AlpineRuntime
+import java.io.File
+import java.io.InputStream
+import java.util.Locale
+import java.util.UUID
+import java.util.zip.ZipInputStream
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import org.jsoup.Jsoup
+import org.json.JSONObject
+
+private const val PiPackagesUrl = "https://pi.dev/packages"
+private const val AetherExtensionGuestDirectory = "/root/.aether/extensions"
+private const val PiUserExtensionGuestDirectory = "/root/.pi/agent/extensions"
+private const val MaxExtensionArchiveBytes = 32L * 1024L * 1024L
+private const val MaxExtensionExtractedBytes = 128L * 1024L * 1024L
+private const val MaxExtensionEntryBytes = 16L * 1024L * 1024L
+private const val MaxExtensionZipEntries = 4096
+private val ExtensionFilePattern = Regex(""".*\.(?:[cm]?[jt]s)$""", RegexOption.IGNORE_CASE)
+private val ExtensionIndexNames = setOf(
+    "index.ts",
+    "index.js",
+    "index.mts",
+    "index.mjs",
+    "index.cts",
+    "index.cjs",
+)
+
+enum class PiExtensionInstallKind {
+    Package,
+    Imported,
+}
+
+data class InstalledPiExtension(
+    val id: String,
+    val name: String,
+    val source: String,
+    val version: String = "",
+    val description: String = "",
+    val installedPath: String = "",
+    val extensionCount: Int = 0,
+    val skillCount: Int = 0,
+    val promptCount: Int = 0,
+    val themeCount: Int = 0,
+    val kind: PiExtensionInstallKind,
+)
+
+enum class PiPackageCompatibilityIssue {
+    InteractiveUi,
+    Theme,
+    Prompt,
+    Platform,
+}
+
+data class PiExtensionCatalogEntry(
+    val name: String,
+    val source: String,
+    val description: String,
+    val author: String,
+    val monthlyDownloads: Long,
+    val packageUrl: String,
+    val npmUrl: String,
+    val repositoryUrl: String,
+    val types: List<String> = emptyList(),
+    val compatibilityIssue: PiPackageCompatibilityIssue? = null,
+)
+
+data class PiPackageDetails(
+    val source: String,
+    val name: String,
+    val description: String,
+    val version: String,
+    val published: String,
+    val downloads: String,
+    val author: String,
+    val license: String,
+    val size: String,
+    val dependencies: String,
+    val types: List<String>,
+    val manifestJson: String,
+    val readmeMarkdown: String,
+    val packageUrl: String,
+    val npmUrl: String,
+    val repositoryUrl: String,
+    val compatibilityIssue: PiPackageCompatibilityIssue?,
+)
+
+internal fun parsePiPackageCatalog(html: String): List<PiExtensionCatalogEntry> {
+    val document = Jsoup.parse(html, PiPackagesUrl)
+    return document
+        .select("article[data-package-card]")
+        .mapNotNull { card ->
+            val declaredTypes = card.attr("data-package-types")
+                .split(',', ' ')
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+            val badgeTypes = card.select(".packages-badges [data-type]")
+                .map { it.attr("data-type").trim() }
+                .filter { it.isNotBlank() && !it.equals("package", ignoreCase = true) }
+            val types = (declaredTypes + badgeTypes)
+                .distinctBy { it.lowercase(Locale.US) }
+            val name = card.attr("data-package-name").trim()
+            val installCommand = card.selectFirst("[data-copy-text^=\"pi install \"]")
+                ?.attr("data-copy-text")
+                ?.trim()
+                .orEmpty()
+            val source = installCommand.removePrefix("pi install ").trim()
+            if (name.isBlank() || !source.startsWith("npm:")) {
+                return@mapNotNull null
+            }
+            val metadata = card.select(".packages-meta span")
+            val packagePath = card.selectFirst("[data-package-path]")
+                ?.attr("data-package-path")
+                .orEmpty()
+            val links = card.select(".packages-links a[href]")
+            val description = card.selectFirst(".packages-desc")?.text().orEmpty()
+            val searchText = card.attr("data-package-search")
+            PiExtensionCatalogEntry(
+                name = name,
+                source = source,
+                description = description,
+                author = metadata.firstOrNull()?.text().orEmpty(),
+                monthlyDownloads = card.attr("data-package-downloads").toLongOrNull() ?: 0L,
+                packageUrl = if (packagePath.isBlank()) "" else "https://pi.dev$packagePath",
+                npmUrl = links.firstOrNull { it.attr("href").contains("npmjs.com/package/") }
+                    ?.attr("href")
+                    .orEmpty(),
+                repositoryUrl = links.firstOrNull {
+                    val href = it.attr("href")
+                    href.contains("github.com/") && !href.contains("/issues/new")
+                }?.attr("href").orEmpty(),
+                types = types,
+                compatibilityIssue = detectPiPackageCompatibility(
+                    name = name,
+                    description = "$description $searchText",
+                    types = types,
+                ),
+            )
+        }
+        .distinctBy(PiExtensionCatalogEntry::source)
+        .sortedWith(
+            compareByDescending<PiExtensionCatalogEntry> { it.monthlyDownloads }
+                .thenBy { it.name.lowercase(Locale.US) }
+        )
+}
+
+internal fun parsePiPackageDetails(
+    html: String,
+    packageUrl: String,
+): PiPackageDetails {
+    val document = Jsoup.parse(html, packageUrl)
+    val definitionValues = buildMap {
+        val terms = document.select(".detail-grid dt")
+        val definitions = document.select(".detail-grid dd")
+        terms.forEachIndexed { index, term ->
+            val key = term.text().trim().lowercase(Locale.US)
+            if (key.isNotBlank()) {
+                put(key, definitions.getOrNull(index)?.text().orEmpty())
+            }
+        }
+    }
+    val installCommand = document.selectFirst("[data-copy-text^=\"pi install \"]")
+        ?.attr("data-copy-text")
+        ?.trim()
+        .orEmpty()
+    val source = installCommand.removePrefix("pi install ").trim()
+    val types = document.select(".packages-badges [data-type]")
+        .map { it.attr("data-type").trim() }
+        .filter { it.isNotBlank() && !it.equals("package", ignoreCase = true) }
+        .ifEmpty {
+            definitionValues["types"]
+                .orEmpty()
+                .split(',', ' ')
+                .map(String::trim)
+                .filter(String::isNotBlank)
+        }
+        .distinctBy { it.lowercase(Locale.US) }
+    val links = document.select(".packages-detail-links a[href]")
+    val readmeRoot = document.selectFirst(".packages-readme")
+    readmeRoot?.select("[href]")?.forEach { element ->
+        element.absUrl("href").takeIf(String::isNotBlank)?.let { element.attr("href", it) }
+    }
+    readmeRoot?.select("[src]")?.forEach { element ->
+        element.absUrl("src").takeIf(String::isNotBlank)?.let { element.attr("src", it) }
+    }
+    val readmeMarkdown = readmeRoot
+        ?.let { FlexmarkHtmlConverter.builder().build().convert(it.outerHtml()).trim() }
+        .orEmpty()
+    val description = document.selectFirst(".content-description")?.text().orEmpty()
+    val name = document.selectFirst(".content-title")?.text().orEmpty()
+        .ifBlank { definitionValues["package"].orEmpty() }
+    val manifestJson = document.selectFirst(".raw-data-panel")?.text().orEmpty()
+    return PiPackageDetails(
+        source = source,
+        name = name,
+        description = description,
+        version = definitionValues["version"].orEmpty(),
+        published = definitionValues["published"].orEmpty(),
+        downloads = definitionValues["downloads"].orEmpty(),
+        author = definitionValues["author"].orEmpty(),
+        license = definitionValues["license"].orEmpty(),
+        size = definitionValues["size"].orEmpty(),
+        dependencies = definitionValues["dependencies"].orEmpty(),
+        types = types,
+        manifestJson = manifestJson,
+        readmeMarkdown = readmeMarkdown,
+        packageUrl = packageUrl,
+        npmUrl = links.firstOrNull { it.attr("href").contains("npmjs.com/package/") }
+            ?.attr("href")
+            .orEmpty(),
+        repositoryUrl = links.firstOrNull {
+            val href = it.attr("href")
+            href.contains("github.com/") && !href.contains("/issues/new")
+        }?.attr("href").orEmpty(),
+        compatibilityIssue = detectPiPackageCompatibility(
+            name = name,
+            description = description,
+            types = types,
+            readmeMarkdown = readmeMarkdown,
+            manifestJson = manifestJson,
+        ),
+    )
+}
+
+internal fun detectPiPackageCompatibility(
+    name: String,
+    description: String,
+    types: List<String>,
+    readmeMarkdown: String = "",
+    manifestJson: String = "",
+): PiPackageCompatibilityIssue? {
+    val normalizedTypes = types.map { it.lowercase(Locale.US) }.toSet()
+    val text = listOf(name, description, readmeMarkdown, manifestJson)
+        .joinToString(" ")
+        .lowercase(Locale.US)
+    val interactiveUiSignals = listOf(
+        "interactive tui",
+        "terminal ui",
+        "live overlay",
+        "status bar",
+        "powerline footer",
+        "custom footer",
+        "custom header",
+        "keyboard shortcut",
+        "clickable tui",
+        "tui click",
+        "tui overlay",
+        "plan review with annotations",
+        "structured questionnaire",
+        "webview window",
+        "local browser ui",
+        "micro-ui",
+        "ctx.ui",
+        "registershortcut",
+    )
+    if (
+        interactiveUiSignals.any(text::contains) ||
+        Regex("""\btui\b""").containsMatchIn(text)
+    ) {
+        return PiPackageCompatibilityIssue.InteractiveUi
+    }
+    if ("theme" in normalizedTypes) {
+        return PiPackageCompatibilityIssue.Theme
+    }
+    val platformSignals = listOf(
+        "macos only",
+        "windows only",
+        "darwin only",
+        "requires macos",
+        "requires windows",
+        "x64 only",
+        "amd64 only",
+    )
+    if (platformSignals.any(text::contains)) {
+        return PiPackageCompatibilityIssue.Platform
+    }
+    if ("prompt" in normalizedTypes && normalizedTypes.none { it == "extension" || it == "skill" }) {
+        return PiPackageCompatibilityIssue.Prompt
+    }
+    return null
+}
+
+class PiExtensionManager(
+    context: Context,
+    private val alpineRuntime: AlpineRuntime,
+    private val piKernelBridge: PiKernelBridge,
+    private val skillManager: AgentSkillManager,
+    private val httpClient: OkHttpClient = OkHttpClient(),
+) {
+    private val appContext = context.applicationContext
+
+    suspend fun fetchCatalog(): Result<List<PiExtensionCatalogEntry>> = withContext(Dispatchers.IO) {
+        runCatching {
+            val request = Request.Builder()
+                .url(PiPackagesUrl)
+                .header("Accept", "text/html")
+                .header("User-Agent", "Aether-Android")
+                .build()
+            httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    error("Pi package catalog failed with HTTP ${response.code}.")
+                }
+                val html = response.body?.string() ?: error("Pi package catalog returned an empty body.")
+                parsePiPackageCatalog(html)
+            }
+        }
+    }
+
+    suspend fun fetchPackageDetails(
+        entry: PiExtensionCatalogEntry,
+    ): Result<PiPackageDetails> = withContext(Dispatchers.IO) {
+        runCatching {
+            require(entry.packageUrl.startsWith("https://pi.dev/packages/")) {
+                "Package details must come from pi.dev."
+            }
+            val request = Request.Builder()
+                .url(entry.packageUrl)
+                .header("Accept", "text/html")
+                .header("User-Agent", "Aether-Android")
+                .build()
+            httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    error("Pi package details failed with HTTP ${response.code}.")
+                }
+                val html = response.body?.string()
+                    ?: error("Pi package details returned an empty body.")
+                parsePiPackageDetails(html, entry.packageUrl).let { details ->
+                    details.copy(
+                        source = details.source.ifBlank { entry.source },
+                        name = details.name.ifBlank { entry.name },
+                        description = details.description.ifBlank { entry.description },
+                        npmUrl = details.npmUrl.ifBlank { entry.npmUrl },
+                        repositoryUrl = details.repositoryUrl.ifBlank { entry.repositoryUrl },
+                        compatibilityIssue = details.compatibilityIssue ?: entry.compatibilityIssue,
+                    )
+                }
+            }
+        }
+    }
+
+    suspend fun listInstalled(): Result<List<InstalledPiExtension>> = withContext(Dispatchers.IO) {
+        runCatching {
+            val packageResponse = piKernelBridge.listExtensionPackages()
+            val packages = packageResponse.optJSONArray("packages")
+            val packageSkills = mutableListOf<PiPackageSkillSource>()
+            val installedPackages = buildList {
+                if (packages != null) {
+                    for (index in 0 until packages.length()) {
+                        val item = packages.optJSONObject(index) ?: continue
+                        val source = item.optString("source").trim()
+                        if (source.isBlank()) continue
+                        add(
+                            InstalledPiExtension(
+                                id = "package:$source",
+                                name = item.optString("name").ifBlank {
+                                    source.removePrefix("npm:")
+                                },
+                                source = source,
+                                version = item.optString("version"),
+                                description = item.optString("description"),
+                                installedPath = item.optString("installed_path"),
+                                extensionCount = item.optInt("extension_count"),
+                                skillCount = item.optInt("skill_count"),
+                                promptCount = item.optInt("prompt_count"),
+                                themeCount = item.optInt("theme_count"),
+                                kind = PiExtensionInstallKind.Package,
+                            )
+                        )
+                        val skillPaths = item.optJSONArray("skill_paths")
+                        if (skillPaths != null) {
+                            for (skillIndex in 0 until skillPaths.length()) {
+                                val guestPath = skillPaths.optString(skillIndex).trim()
+                                if (guestPath.isBlank()) continue
+                                val hostPath = alpineRuntime.resolveGuestPath(guestPath)
+                                if (!hostPath.exists()) continue
+                                packageSkills += PiPackageSkillSource(
+                                    packageSource = source,
+                                    packageName = item.optString("name").ifBlank {
+                                        source.removePrefix("npm:")
+                                    },
+                                    guestPath = guestPath,
+                                    hostPath = hostPath,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+            skillManager.syncPiPackageSkills(packageSkills).getOrThrow()
+            (installedPackages + listImportedExtensions())
+                .distinctBy(InstalledPiExtension::id)
+                .sortedBy { it.name.lowercase(Locale.US) }
+        }
+    }
+
+    suspend fun installPackage(source: String): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            piKernelBridge.installExtensionPackage(source)
+            Unit
+        }
+    }
+
+    suspend fun updatePackage(source: String): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            piKernelBridge.updateExtensionPackage(source)
+            Unit
+        }
+    }
+
+    suspend fun remove(extension: InstalledPiExtension): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            when (extension.kind) {
+                PiExtensionInstallKind.Package -> {
+                    val response = piKernelBridge.removeExtensionPackage(extension.source)
+                    require(response.optBoolean("removed")) {
+                        "No installed Pi extension matched ${extension.source}."
+                    }
+                }
+
+                PiExtensionInstallKind.Imported -> {
+                    removeImportedExtension(extension.installedPath)
+                    piKernelBridge.reloadAllExtensions()
+                }
+            }
+            Unit
+        }
+    }
+
+    suspend fun importFromUri(uri: Uri): Result<InstalledPiExtension> = withContext(Dispatchers.IO) {
+        runCatching {
+            val displayName = queryDisplayName(uri)
+            val importRoot = alpineRuntime.ensureGuestDirectory(AetherExtensionGuestDirectory)
+            val installedFile = if (displayName.endsWith(".zip", ignoreCase = true)) {
+                importZip(uri, displayName, importRoot)
+            } else {
+                importExtensionFile(uri, displayName, importRoot)
+            }
+            piKernelBridge.reloadAllExtensions()
+            importedExtension(installedFile, "aether")
+                ?: error("The imported source did not contain a loadable Pi extension.")
+        }
+    }
+
+    private suspend fun listImportedExtensions(): List<InstalledPiExtension> {
+        val roots = listOf(
+            "aether" to alpineRuntime.ensureGuestDirectory(AetherExtensionGuestDirectory),
+            "pi" to alpineRuntime.ensureGuestDirectory(PiUserExtensionGuestDirectory),
+        )
+        return roots.flatMap { (scope, root) ->
+            root.listFiles()
+                .orEmpty()
+                .filterNot { it.name.startsWith(".aether-import-") }
+                .mapNotNull { importedExtension(it, scope) }
+        }
+    }
+
+    private fun importedExtension(file: File, scope: String): InstalledPiExtension? {
+        val entryCount = when {
+            file.isFile && ExtensionFilePattern.matches(file.name) -> 1
+            file.isDirectory -> packageExtensionEntries(file).size
+            else -> 0
+        }
+        if (entryCount == 0) return null
+        val manifest = if (file.isDirectory) {
+            runCatching {
+                File(file, "package.json").takeIf(File::isFile)
+                    ?.readText(Charsets.UTF_8)
+                    ?.let(::JSONObject)
+            }.getOrNull()
+        } else {
+            null
+        }
+        return InstalledPiExtension(
+            id = "import:$scope:${file.canonicalPath}",
+            name = manifest?.optString("name").orEmpty().ifBlank { file.nameWithoutExtension },
+            source = if (scope == "pi") "Pi user directory" else "Imported",
+            version = manifest?.optString("version").orEmpty(),
+            description = manifest?.optString("description").orEmpty(),
+            installedPath = file.canonicalPath,
+            extensionCount = entryCount,
+            kind = PiExtensionInstallKind.Imported,
+        )
+    }
+
+    private fun packageExtensionEntries(directory: File): List<File> {
+        val manifest = runCatching {
+            File(directory, "package.json").takeIf(File::isFile)
+                ?.readText(Charsets.UTF_8)
+                ?.let(::JSONObject)
+        }.getOrNull()
+        val configuredEntries = manifest
+            ?.optJSONObject("pi")
+            ?.optJSONArray("extensions")
+            ?.let { extensions ->
+                buildList {
+                    for (index in 0 until extensions.length()) {
+                        val relativePath = extensions.optString(index).trim()
+                        if (relativePath.isNotBlank()) {
+                            add(File(directory, relativePath))
+                        }
+                    }
+                }
+            }
+            .orEmpty()
+            .filter(File::isFile)
+        if (configuredEntries.isNotEmpty()) return configuredEntries
+        return ExtensionIndexNames
+            .map { File(directory, it) }
+            .filter(File::isFile)
+    }
+
+    private fun importExtensionFile(
+        uri: Uri,
+        displayName: String,
+        importRoot: File,
+    ): File {
+        require(ExtensionFilePattern.matches(displayName)) {
+            "Choose a Pi extension JavaScript/TypeScript file or a .zip package."
+        }
+        val safeName = sanitizeFileName(displayName)
+        val staging = File(importRoot, ".aether-import-${UUID.randomUUID()}-$safeName")
+        val destination = File(importRoot, safeName)
+        try {
+            appContext.contentResolver.openInputStream(uri).use { input ->
+                requireNotNull(input) { "Unable to open the selected extension file." }
+                staging.outputStream().use { output ->
+                    copyWithLimit(input, output, MaxExtensionEntryBytes)
+                }
+            }
+            if (destination.exists()) destination.deleteRecursively()
+            require(staging.renameTo(destination) || runCatching {
+                staging.copyTo(destination, overwrite = true)
+                staging.delete()
+                true
+            }.getOrDefault(false)) {
+                "Unable to store the imported extension."
+            }
+            return destination
+        } finally {
+            staging.deleteRecursively()
+        }
+    }
+
+    private fun importZip(
+        uri: Uri,
+        displayName: String,
+        importRoot: File,
+    ): File {
+        val extractionRoot = File(importRoot, ".aether-import-${UUID.randomUUID()}").apply {
+            require(mkdirs()) { "Unable to prepare extension import." }
+        }
+        try {
+            appContext.contentResolver.openInputStream(uri).use { input ->
+                requireNotNull(input) { "Unable to open the selected extension archive." }
+                extractZip(input, extractionRoot)
+            }
+            val packageRoot = locatePackageRoot(extractionRoot)
+            val manifestName = runCatching {
+                File(packageRoot, "package.json").takeIf(File::isFile)
+                    ?.readText(Charsets.UTF_8)
+                    ?.let(::JSONObject)
+                    ?.optString("name")
+            }.getOrNull().orEmpty()
+            val destinationName = sanitizeDirectoryName(
+                manifestName.ifBlank { displayName.substringBeforeLast('.') }
+            )
+            val staging = File(importRoot, ".aether-import-${UUID.randomUUID()}-$destinationName")
+            packageRoot.copyRecursively(staging, overwrite = false)
+            val destination = File(importRoot, destinationName)
+            if (destination.exists()) destination.deleteRecursively()
+            require(staging.renameTo(destination) || runCatching {
+                staging.copyRecursively(destination, overwrite = true)
+                staging.deleteRecursively()
+                true
+            }.getOrDefault(false)) {
+                "Unable to store the imported extension package."
+            }
+            return destination
+        } finally {
+            extractionRoot.deleteRecursively()
+        }
+    }
+
+    private fun extractZip(
+        input: InputStream,
+        destinationRoot: File,
+    ) {
+        val canonicalRoot = destinationRoot.canonicalFile
+        var entryCount = 0
+        var totalBytes = 0L
+        ZipInputStream(CountingLimitedInputStream(input, MaxExtensionArchiveBytes)).use { zipInput ->
+            while (true) {
+                val entry = zipInput.nextEntry ?: break
+                entryCount += 1
+                require(entryCount <= MaxExtensionZipEntries) {
+                    "Extension archive contains too many files."
+                }
+                val relativePath = entry.name.replace('\\', '/').trimStart('/')
+                require(
+                    relativePath.isNotBlank() &&
+                        relativePath.split('/').none { it == ".." }
+                ) {
+                    "Extension archive contains an unsafe path."
+                }
+                val target = File(canonicalRoot, relativePath).canonicalFile
+                require(
+                    target.path == canonicalRoot.path ||
+                        target.path.startsWith(canonicalRoot.path + File.separator)
+                ) {
+                    "Extension archive entry escaped the destination directory."
+                }
+                if (entry.isDirectory) {
+                    require(target.mkdirs() || target.isDirectory) {
+                        "Unable to create extension archive directory."
+                    }
+                } else {
+                    val parent = requireNotNull(target.parentFile)
+                    require(parent.mkdirs() || parent.isDirectory) {
+                        "Unable to create extension archive directory."
+                    }
+                    target.outputStream().use { output ->
+                        val copied = copyWithLimit(zipInput, output, MaxExtensionEntryBytes)
+                        totalBytes += copied
+                        require(totalBytes <= MaxExtensionExtractedBytes) {
+                            "Extension archive expands to too much data."
+                        }
+                    }
+                }
+                zipInput.closeEntry()
+            }
+        }
+    }
+
+    private fun locatePackageRoot(extractionRoot: File): File {
+        if (packageExtensionEntries(extractionRoot).isNotEmpty()) return extractionRoot
+        val candidates = extractionRoot.listFiles()
+            .orEmpty()
+            .filter { it.isDirectory && it.name != "__MACOSX" }
+        val candidate = candidates.singleOrNull()
+            ?.takeIf { packageExtensionEntries(it).isNotEmpty() }
+        return candidate ?: error(
+            "The archive must contain package.json with pi.extensions or an index extension file."
+        )
+    }
+
+    private suspend fun removeImportedExtension(installedPath: String) {
+        val target = File(installedPath).canonicalFile
+        val allowedRoots = listOf(
+            alpineRuntime.ensureGuestDirectory(AetherExtensionGuestDirectory).canonicalFile,
+            alpineRuntime.ensureGuestDirectory(PiUserExtensionGuestDirectory).canonicalFile,
+        )
+        require(allowedRoots.any { root -> target.parentFile == root }) {
+            "Refusing to remove an extension outside a managed import directory."
+        }
+        require(target.exists()) { "The imported extension no longer exists." }
+        require(target.deleteRecursively()) { "Unable to remove the imported extension." }
+    }
+
+    private fun queryDisplayName(uri: Uri): String {
+        val fromCursor = appContext.contentResolver.query(
+            uri,
+            arrayOf(OpenableColumns.DISPLAY_NAME),
+            null,
+            null,
+            null,
+        )?.use { cursor ->
+            if (cursor.moveToFirst()) cursor.getString(0) else null
+        }
+        return fromCursor
+            ?.trim()
+            ?.takeIf(String::isNotBlank)
+            ?: uri.lastPathSegment?.substringAfterLast('/')?.trim().orEmpty()
+                .ifBlank { "extension.ts" }
+    }
+}
+
+private fun sanitizeFileName(raw: String): String {
+    val extension = raw.substringAfterLast('.', "").lowercase(Locale.US)
+    require(extension in setOf("ts", "js", "mts", "mjs", "cts", "cjs")) {
+        "Unsupported Pi extension file type."
+    }
+    val stem = raw.substringBeforeLast('.')
+        .lowercase(Locale.US)
+        .replace(Regex("[^a-z0-9._-]+"), "-")
+        .trim('-', '.')
+        .ifBlank { "extension" }
+    return "$stem.$extension"
+}
+
+private fun sanitizeDirectoryName(raw: String): String =
+    raw.lowercase(Locale.US)
+        .replace(Regex("[^a-z0-9._-]+"), "-")
+        .trim('-', '.')
+        .ifBlank { "extension-${UUID.randomUUID()}" }
+
+private fun copyWithLimit(
+    input: InputStream,
+    output: java.io.OutputStream,
+    limit: Long,
+): Long {
+    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+    var copied = 0L
+    while (true) {
+        val read = input.read(buffer)
+        if (read < 0) break
+        copied += read
+        require(copied <= limit) { "Extension file is too large." }
+        output.write(buffer, 0, read)
+    }
+    return copied
+}
+
+private class CountingLimitedInputStream(
+    input: InputStream,
+    private val limit: Long,
+) : java.io.FilterInputStream(input) {
+    private var count = 0L
+
+    override fun read(): Int {
+        val value = super.read()
+        if (value >= 0) increment(1)
+        return value
+    }
+
+    override fun read(
+        buffer: ByteArray,
+        offset: Int,
+        length: Int,
+    ): Int {
+        val read = super.read(buffer, offset, length)
+        if (read > 0) increment(read)
+        return read
+    }
+
+    private fun increment(amount: Int) {
+        count += amount
+        require(count <= limit) { "Extension archive is too large." }
+    }
+}

@@ -1,5 +1,6 @@
 package com.zhousl.aether.data
 
+import com.zhousl.aether.data.pi.PiKernelBridge
 import com.zhousl.aether.termux.TermuxBashTool
 import com.zhousl.aether.termux.TermuxSetupState
 import java.util.Locale
@@ -19,6 +20,8 @@ class AetherSelfManagementTool(
     private val agentModeController: AgentModeController,
     private val mcpClientManager: McpClientManager,
     private val scheduledTaskManager: ScheduledTaskManager,
+    private val piKernelBridge: PiKernelBridge,
+    private val sessionId: String,
     private val diagnosticLogger: AetherDiagnosticLogger = AetherDiagnosticLogger.NoOp,
 ) {
     fun toolDefinitions(): List<JSONObject> = listOf(
@@ -229,6 +232,34 @@ class AetherSelfManagementTool(
             required = listOf("action"),
         ),
         buildAetherToolDefinition(
+            name = "aether_extension_manage",
+            description = "List or reload source-compatible Pi extensions for the current Aether session, or invoke a registered Pi extension command. Extensions are discovered from ~/.pi/agent/extensions, the workspace .pi/extensions directory, and ~/.aether/extensions. Custom Pi TUI components are not supported.",
+            properties = JSONObject().apply {
+                put(
+                    "action",
+                    JSONObject().apply {
+                        put("type", "string")
+                        put("enum", JSONArray(listOf("list", "reload", "invoke_command")))
+                    },
+                )
+                put(
+                    "command",
+                    JSONObject().apply {
+                        put("type", "string")
+                        put("description", "Registered extension command name, with or without a leading slash.")
+                    },
+                )
+                put(
+                    "args",
+                    JSONObject().apply {
+                        put("type", "string")
+                        put("description", "Raw command argument string.")
+                    },
+                )
+            },
+            required = listOf("action"),
+        ),
+        buildAetherToolDefinition(
             name = "aether_developer_manage",
             description = "Read Aether developer diagnostics such as recent diagnostic events or last crash details. Sensitive values are redacted.",
             properties = JSONObject().apply {
@@ -263,6 +294,7 @@ class AetherSelfManagementTool(
         "aether_termux_manage" -> executeTermuxManage(argumentsJson)
         "aether_agent_mode_manage" -> executeAgentModeManage(argumentsJson)
         "aether_scheduled_task_manage" -> executeScheduledTaskManage(argumentsJson)
+        "aether_extension_manage" -> executeExtensionManage(argumentsJson)
         "aether_developer_manage" -> executeDeveloperManage(argumentsJson)
         else -> failure("Unknown Aether self-management tool '$toolName'.")
     }
@@ -779,6 +811,57 @@ class AetherSelfManagementTool(
             }
 
             else -> failure("Unsupported developer action '$action'.")
+        }
+    }
+
+    private suspend fun executeExtensionManage(argumentsJson: String): String {
+        val arguments = parseArguments(argumentsJson) ?: return invalidJson()
+        return runCatching {
+            when (val action = arguments.optString("action").trim().lowercase(Locale.US)) {
+                "list" -> {
+                    val payload = piKernelBridge.listExtensions(sessionId)
+                    success(payload) {
+                        put(
+                            "stdout",
+                            "Found ${payload.optJSONArray("extension_paths")?.length() ?: 0} loaded Pi extensions.",
+                        )
+                    }
+                }
+
+                "reload" -> {
+                    val payload = piKernelBridge.reloadExtensions(sessionId)
+                    success(payload) {
+                        put(
+                            "stdout",
+                            when {
+                                payload.optBoolean("scheduled") ->
+                                    "Pi extension reload is scheduled for the end of the current turn."
+                                payload.optBoolean("reloaded") ->
+                                    "Reloaded Pi extensions."
+                                else ->
+                                    "Pi extension reload was rejected. Inspect the returned errors."
+                            },
+                        )
+                    }
+                }
+
+                "invoke_command" -> {
+                    val command = arguments.optString("command").trim()
+                    if (command.isBlank()) return failure("command is required for invoke_command.")
+                    val payload = piKernelBridge.invokeExtensionCommand(
+                        sessionId = sessionId,
+                        command = command,
+                        args = arguments.optString("args"),
+                    )
+                    success(payload) {
+                        put("stdout", "Invoked Pi extension command '$command'.")
+                    }
+                }
+
+                else -> failure("Unsupported Pi extension action '$action'.")
+            }
+        }.getOrElse { throwable ->
+            failure(throwable.message ?: "Pi extension operation failed.")
         }
     }
 

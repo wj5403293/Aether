@@ -135,6 +135,20 @@ class AlpineRuntime(
         target
     }
 
+    internal suspend fun ensureGuestDirectory(guestPath: String): File = withContext(Dispatchers.IO) {
+        requireReady()
+        guestPathToHostFile(normalizePath(guestPath)).apply {
+            require(mkdirs() || isDirectory) {
+                "Unable to create Alpine directory: $guestPath"
+            }
+        }
+    }
+
+    internal suspend fun resolveGuestPath(guestPath: String): File = withContext(Dispatchers.IO) {
+        requireReady()
+        guestPathToHostFile(normalizePath(guestPath))
+    }
+
     suspend fun startManagedProcess(
         command: String,
         workingDirectory: String = homeDirectory,

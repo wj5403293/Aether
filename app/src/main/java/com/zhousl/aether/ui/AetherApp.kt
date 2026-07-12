@@ -337,6 +337,20 @@ private fun AetherAppContent(
             }
         },
     )
+    val piExtensionImportPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+        onResult = { extensionUri ->
+            if (extensionUri != null) {
+                runCatching {
+                    context.contentResolver.takePersistableUriPermission(
+                        extensionUri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                    )
+                }
+                viewModel.importPiExtension(extensionUri)
+            }
+        },
+    )
     val saveAttachmentLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("*/*"),
         onResult = { destinationUri ->
@@ -730,6 +744,15 @@ private fun AetherAppContent(
                     alpinePackageProfiles = uiState.settings.alpinePackageProfiles,
                     developerTermuxReadyOverride = uiState.developerTermuxReadyOverride,
                     installedSkills = uiState.installedSkills,
+                    installedPiExtensions = uiState.installedPiExtensions,
+                    piExtensionCatalog = uiState.piExtensionCatalog,
+                    isLoadingPiExtensions = uiState.isLoadingPiExtensions,
+                    piExtensionCatalogError = uiState.piExtensionCatalogError,
+                    piExtensionOperationSource = uiState.piExtensionOperationSource,
+                    selectedPiPackageDetails = uiState.selectedPiPackageDetails,
+                    selectedPiPackageSource = uiState.selectedPiPackageSource,
+                    isLoadingPiPackageDetails = uiState.isLoadingPiPackageDetails,
+                    piPackageDetailsError = uiState.piPackageDetailsError,
                     mcpServers = uiState.mcpServers,
                     isFetchingModels = uiState.isFetchingModels,
                     providerAuthState = uiState.providerAuthState,
@@ -757,6 +780,23 @@ private fun AetherAppContent(
                     },
                     onToggleSkillEnabled = viewModel::setSkillEnabled,
                     onRemoveSkill = viewModel::removeSkill,
+                    onRefreshPiExtensions = viewModel::refreshPiExtensions,
+                    onInstallPiExtensionPackage = viewModel::installPiExtensionPackage,
+                    onLoadPiPackageDetails = viewModel::loadPiPackageDetails,
+                    onUpdatePiExtensionPackage = viewModel::updatePiExtensionPackage,
+                    onRemovePiExtension = viewModel::removePiExtension,
+                    onImportPiExtension = {
+                        piExtensionImportPicker.launch(
+                            arrayOf(
+                                "application/zip",
+                                "application/javascript",
+                                "text/javascript",
+                                "text/typescript",
+                                "application/octet-stream",
+                                "*/*",
+                            )
+                        )
+                    },
                     onSaveHttpMcpServer = viewModel::saveStreamableHttpMcpServer,
                     onSaveStdIoMcpServer = viewModel::saveStdIoMcpServer,
                     onToggleMcpServerEnabled = viewModel::setMcpServerEnabled,

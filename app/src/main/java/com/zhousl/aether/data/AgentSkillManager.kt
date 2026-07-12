@@ -32,6 +32,13 @@ private const val MaxSkillExtractedBytes = 128L * 1024L * 1024L
 private const val MaxSkillEntryBytes = 16L * 1024L * 1024L
 private const val MaxSkillZipEntries = 4096
 
+data class PiPackageSkillSource(
+    val packageSource: String,
+    val packageName: String,
+    val guestPath: String,
+    val hostPath: File,
+)
+
 class AgentSkillManager(
     private val context: Context,
     private val extensionsRepository: AgentExtensionsRepository,
@@ -129,6 +136,65 @@ class AgentSkillManager(
         }
     }
 
+    suspend fun syncPiPackageSkills(
+        packageSkills: List<PiPackageSkillSource>,
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val desiredKeys = packageSkills
+                .map { packageSkillKey(it.packageSource, it.guestPath) }
+                .toSet()
+            val initialSkills = extensionsRepository.extensionState.firstValue().installedSkills
+            packageSkills.distinctBy { packageSkillKey(it.packageSource, it.guestPath) }
+                .forEach { packageSkill ->
+                    runCatching {
+                        val sourceRoot = when {
+                            packageSkill.hostPath.isFile -> packageSkill.hostPath.parentFile
+                            packageSkill.hostPath.isDirectory -> locateSkillRoot(packageSkill.hostPath)
+                            else -> null
+                        } ?: return@runCatching
+                        val key = packageSkillKey(packageSkill.packageSource, packageSkill.guestPath)
+                        val skillId = "pi-package-${sha256OfText(key).take(20)}"
+                        val existing = initialSkills.firstOrNull { it.id == skillId }
+                        val checksum = sha256OfDirectory(sourceRoot)
+                        if (
+                            existing?.checksumSha256 == checksum &&
+                            validatedInstalledSkillRoot(existing) != null
+                        ) {
+                            return@runCatching
+                        }
+                        installParsedSkill(
+                            sourceRoot = sourceRoot,
+                            source = SkillInstallSource(
+                                kind = SkillInstallKind.PiPackage,
+                                label = packageSkill.packageName,
+                                uri = packageSkill.packageSource,
+                                subpath = packageSkill.guestPath,
+                            ),
+                            skillIdOverride = skillId,
+                            installedAtMillis = existing?.installedAtMillis,
+                            isEnabled = existing?.isEnabled ?: true,
+                        )
+                    }
+                }
+
+            val refreshedSkills = extensionsRepository.extensionState.firstValue().installedSkills
+            val stalePackageSkills = refreshedSkills.filter { skill ->
+                skill.source.kind == SkillInstallKind.PiPackage &&
+                    packageSkillKey(skill.source.uri, skill.source.subpath) !in desiredKeys
+            }
+            if (stalePackageSkills.isNotEmpty()) {
+                stalePackageSkills.forEach { skill ->
+                    validatedInstalledSkillRoot(skill)?.deleteRecursively()
+                }
+                extensionsRepository.updateInstalledSkills(
+                    refreshedSkills.filterNot { candidate ->
+                        stalePackageSkills.any { it.id == candidate.id }
+                    }
+                )
+            }
+        }
+    }
+
     suspend fun buildActiveSkillContext(
         skill: InstalledSkill,
     ): Result<ActiveSkillContext> = withContext(Dispatchers.IO) {
@@ -176,11 +242,14 @@ class AgentSkillManager(
     private suspend fun installParsedSkill(
         sourceRoot: File,
         source: SkillInstallSource,
+        skillIdOverride: String? = null,
+        installedAtMillis: Long? = null,
+        isEnabled: Boolean = true,
     ): InstalledSkill {
         val skillFile = File(sourceRoot, SkillFileName)
         require(skillFile.isFile) { "The selected directory does not contain SKILL.md." }
         val parsed = parseSkillDocument(skillFile)
-        val skillId = buildSkillId(parsed.name)
+        val skillId = skillIdOverride ?: buildSkillId(parsed.name)
         val previousSkill = extensionsRepository.extensionState.firstValue()
             .installedSkills
             .firstOrNull { it.id == skillId }
@@ -210,6 +279,9 @@ class AgentSkillManager(
             skillMdPath = File(installRoot, SkillFileName).absolutePath,
             source = source,
             checksumSha256 = checksum,
+            isEnabled = isEnabled,
+            installedAtMillis = installedAtMillis ?: System.currentTimeMillis(),
+            updatedAtMillis = System.currentTimeMillis(),
             diagnostics = parsed.diagnostics,
             resourceEntries = listSkillResources(installRoot),
         )
@@ -501,6 +573,16 @@ class AgentSkillManager(
             .replace(Regex("[^a-z0-9]+"), "-")
             .trim('-')
             .ifBlank { "skill-${UUID.randomUUID()}" }
+
+    private fun packageSkillKey(
+        packageSource: String,
+        guestPath: String,
+    ): String = "${packageSource.trim()}|${guestPath.trim()}"
+
+    private fun sha256OfText(text: String): String =
+        MessageDigest.getInstance("SHA-256")
+            .digest(text.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
 
     private fun sha256OfDirectory(directory: File): String {
         val digest = MessageDigest.getInstance("SHA-256")

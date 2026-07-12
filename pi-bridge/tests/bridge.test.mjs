@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { afterEach, test } from "node:test";
 
@@ -118,6 +121,24 @@ afterEach(async () => {
   await Promise.all([...activeClients].map((client) => client.close()));
 });
 
+test("lists Pi extension packages from an isolated agent directory", async () => {
+  const home = await mkdtemp(join(tmpdir(), "aether-pi-packages-"));
+  const client = new BridgeClient({ HOME: home, USERPROFILE: home });
+  try {
+    const result = await client.request("packages-list", "list_extension_packages");
+    assert.deepEqual(result.packages, []);
+    await assert.rejects(
+      client.request("packages-invalid", "install_extension_package", {
+        source: "https://example.com/extension.zip",
+      }),
+      /npm: source/,
+    );
+  } finally {
+    await client.close();
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 function fauxConfig(overrides = {}) {
   return {
     provider_type: "faux",
@@ -186,7 +207,132 @@ test("reports pinned bridge and Pi versions", async () => {
   assert.equal(ping.bridge_version, "2.0.0-alpha.0");
   assert.equal(ping.pi_ai_version, "0.80.6");
   assert.equal(ping.pi_agent_core_version, "0.80.6");
+  assert.equal(ping.pi_coding_agent_version, "0.80.6");
   assert.match(ping.node_version, /^v\d+\./);
+});
+
+test("loads source-compatible Pi TypeScript extensions and runs their tools", async (t) => {
+  const workspace = await mkdtemp(join(tmpdir(), "aether-pi-extension-"));
+  t.after(() => rm(workspace, { recursive: true, force: true }));
+  const extensionDirectory = join(workspace, ".pi", "extensions");
+  await mkdir(extensionDirectory, { recursive: true });
+  await writeFile(
+    join(extensionDirectory, "echo.ts"),
+    `
+import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { Type } from "typebox";
+
+export default function (pi: ExtensionAPI) {
+  let started = false;
+  pi.on("session_start", () => { started = true; });
+  pi.registerTool({
+    name: "extension_echo",
+    label: "Extension Echo",
+    description: "Echo text through a Pi extension.",
+    parameters: Type.Object({ text: Type.String() }),
+    async execute(_id, params) {
+      return {
+        content: [{ type: "text", text: \`extension:\${params.text}:started=\${started}\` }],
+        details: {},
+      };
+    },
+  });
+}
+`,
+    "utf8",
+  );
+
+  const client = new BridgeClient();
+  const run = client.request(
+    "extension-turn",
+    "run_turn",
+    {
+      ...turnPayload(
+        "session-extension",
+        [userMessage("use the extension")],
+        fauxConfig({
+          faux_response: "extension finished",
+          faux_tool_calls: [
+            { id: "extension-call", name: "extension_echo", arguments: { text: "hello" } },
+          ],
+        }),
+      ),
+      workspace_directory: workspace,
+    },
+  );
+  const toolEnd = await client.waitForEvent(
+    (frame) =>
+      frame.id === "extension-turn" &&
+      frame.event === "tool_call_end" &&
+      frame.payload.name === "extension_echo",
+  );
+  assert.equal(toolEnd.payload.output_json, "extension:hello:started=true");
+  assert.equal((await run).assistant_text, "extension finished");
+
+  const listed = await client.request("extension-list", "list_extensions", {
+    session_id: "session-extension",
+  });
+  assert.equal(listed.custom_tui_supported, false);
+  assert.ok(listed.extension_paths.some((extensionPath) => extensionPath.endsWith("echo.ts")));
+  assert.ok(listed.tools.some((tool) => tool.name === "extension_echo"));
+});
+
+test("reloads Pi extensions atomically for an existing harness session", async (t) => {
+  const workspace = await mkdtemp(join(tmpdir(), "aether-pi-reload-"));
+  t.after(() => rm(workspace, { recursive: true, force: true }));
+  const extensionDirectory = join(workspace, ".pi", "extensions");
+  const extensionPath = join(extensionDirectory, "reloadable.ts");
+  await mkdir(extensionDirectory, { recursive: true });
+
+  const source = (version) => `
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
+export default function (pi: ExtensionAPI) {
+  pi.registerCommand("extension-version", {
+    description: "Active extension version: ${version}",
+    async handler() {},
+  });
+  pi.registerTool({
+    name: "reloadable_echo",
+    label: "Reloadable Echo",
+    description: "Return the active extension version.",
+    parameters: Type.Object({}),
+    async execute() {
+      return { content: [{ type: "text", text: "${version}" }], details: {} };
+    },
+  });
+}
+`;
+  await writeFile(extensionPath, source("v1"), "utf8");
+
+  const client = new BridgeClient();
+  await client.request(
+    "reload-create",
+    "run_turn",
+    {
+      ...turnPayload("session-reload", [userMessage("start")]),
+      workspace_directory: workspace,
+    },
+  );
+  await writeFile(extensionPath, source("v2"), "utf8");
+  const reload = await client.request("reload-request", "reload_extensions", {
+    session_id: "session-reload",
+  });
+  assert.equal(reload.reloaded, true);
+  assert.equal(reload.scheduled, false);
+  assert.deepEqual(reload.errors, []);
+  assert.ok(
+    reload.commands.some(
+      (command) =>
+        command.name === "extension-version" &&
+        command.description === "Active extension version: v2",
+    ),
+  );
+  const invoked = await client.request("reload-command", "invoke_extension_command", {
+    session_id: "session-reload",
+    command: "/extension-version",
+  });
+  assert.equal(invoked.invoked, true);
 });
 
 test("runs text turns and reuses the persisted Pi assistant session", async () => {

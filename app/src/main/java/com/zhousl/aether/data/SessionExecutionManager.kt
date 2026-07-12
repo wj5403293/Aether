@@ -9,6 +9,7 @@ import com.zhousl.aether.runtime.RuntimeRouter
 import com.zhousl.aether.runtime.RuntimeShellTool
 import com.zhousl.aether.data.pi.PiAgentRunner
 import com.zhousl.aether.data.pi.PiCompletionClient
+import com.zhousl.aether.data.pi.PiKernelBridge
 import com.zhousl.aether.termux.TermuxBashTool
 import com.zhousl.aether.ui.AttachmentKind
 import com.zhousl.aether.ui.AssistantResponseBlock
@@ -129,6 +130,7 @@ class SessionExecutionManager(
     private val appForegroundTracker: AppForegroundTracker,
     private val diagnosticLogger: AetherDiagnosticLogger = AetherDiagnosticLogger.NoOp,
     private val piCompletionClient: PiCompletionClient? = null,
+    private val piKernelBridge: PiKernelBridge,
     private val piAgentRunner: PiAgentRunner,
 ) {
     private val currentSettings = MutableStateFlow(AppSettings())
@@ -468,6 +470,8 @@ class SessionExecutionManager(
             agentModeController = agentModeController,
             mcpClientManager = mcpClientManager,
             scheduledTaskManager = scheduledTaskManager,
+            piKernelBridge = piKernelBridge,
+            sessionId = handle.sessionId,
             diagnosticLogger = diagnosticLogger,
         )
 

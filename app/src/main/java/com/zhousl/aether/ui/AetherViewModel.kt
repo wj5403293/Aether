@@ -22,6 +22,8 @@ import com.zhousl.aether.data.AppThemeMode
 import com.zhousl.aether.data.CurrentOnboardingVersion
 import com.zhousl.aether.data.DiagnosticRedactor
 import com.zhousl.aether.data.InstalledSkill
+import com.zhousl.aether.data.InstalledPiExtension
+import com.zhousl.aether.data.PiExtensionCatalogEntry
 import com.zhousl.aether.data.ProviderModelCatalogClient
 import com.zhousl.aether.data.LlmProviderConfig
 import com.zhousl.aether.data.ModelCatalogClient
@@ -130,6 +132,7 @@ class AetherViewModel(
     private val workspaceFileBridge = runtime.workspaceFileBridge
     private val agentModeController = runtime.agentModeController
     private val skillManager = runtime.skillManager
+    private val piExtensionManager = runtime.piExtensionManager
     private val scheduledTaskManager = runtime.scheduledTaskManager
     private val mcpClientManager = McpClientManager(
         runtimeRouter = runtime.runtimeRouter,
@@ -2282,6 +2285,134 @@ class AetherViewModel(
     ) {
         viewModelScope.launch {
             extensionsRepository.setSkillEnabled(skillId, enabled)
+        }
+    }
+
+    fun refreshPiExtensions() {
+        viewModelScope.launch {
+            refreshPiExtensionState(loadCatalog = true)
+        }
+    }
+
+    fun loadPiPackageDetails(entry: PiExtensionCatalogEntry) {
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    selectedPiPackageSource = entry.source,
+                    selectedPiPackageDetails = null,
+                    isLoadingPiPackageDetails = true,
+                    piPackageDetailsError = "",
+                )
+            }
+            val result = piExtensionManager.fetchPackageDetails(entry)
+            _uiState.update { current ->
+                if (current.selectedPiPackageSource != entry.source) {
+                    current
+                } else {
+                    current.copy(
+                        selectedPiPackageDetails = result.getOrNull(),
+                        isLoadingPiPackageDetails = false,
+                        piPackageDetailsError = result.exceptionOrNull()?.userFacingMessage().orEmpty(),
+                    )
+                }
+            }
+        }
+    }
+
+    fun installPiExtensionPackage(source: String) {
+        performPiExtensionOperation(source) {
+            piExtensionManager.installPackage(source)
+        }
+    }
+
+    fun updatePiExtensionPackage(source: String) {
+        performPiExtensionOperation(source) {
+            piExtensionManager.updatePackage(source)
+        }
+    }
+
+    fun removePiExtension(extension: InstalledPiExtension) {
+        performPiExtensionOperation(extension.id) {
+            piExtensionManager.remove(extension)
+        }
+    }
+
+    fun importPiExtension(
+        uri: Uri,
+        onComplete: (Boolean) -> Unit = {},
+    ) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(piExtensionOperationSource = "import") }
+            val result = piExtensionManager.importFromUri(uri)
+            result
+                .onSuccess { extension ->
+                    emitTransientMessage(
+                        uiString(R.string.message_pi_extension_imported, extension.name)
+                    )
+                }
+                .onFailure { throwable ->
+                    emitTransientMessage(
+                        uiString(
+                            R.string.message_pi_extension_operation_failed,
+                            throwable.userFacingMessage(),
+                        )
+                    )
+                }
+            refreshPiExtensionState(loadCatalog = false)
+            _uiState.update { it.copy(piExtensionOperationSource = "") }
+            onComplete(result.isSuccess)
+        }
+    }
+
+    private fun performPiExtensionOperation(
+        operationSource: String,
+        operation: suspend () -> Result<Unit>,
+    ) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(piExtensionOperationSource = operationSource) }
+            val result = operation()
+            result
+                .onSuccess {
+                    emitTransientMessage(uiString(R.string.message_pi_extension_updated))
+                }
+                .onFailure { throwable ->
+                    emitTransientMessage(
+                        uiString(
+                            R.string.message_pi_extension_operation_failed,
+                            throwable.userFacingMessage(),
+                        )
+                    )
+                }
+            refreshPiExtensionState(loadCatalog = false)
+            _uiState.update { it.copy(piExtensionOperationSource = "") }
+        }
+    }
+
+    private suspend fun refreshPiExtensionState(loadCatalog: Boolean) {
+        _uiState.update { it.copy(isLoadingPiExtensions = true) }
+        val installedResult = piExtensionManager.listInstalled()
+        val catalogResult = if (loadCatalog) {
+            piExtensionManager.fetchCatalog()
+        } else {
+            null
+        }
+        _uiState.update { current ->
+            current.copy(
+                installedPiExtensions = installedResult.getOrDefault(current.installedPiExtensions),
+                piExtensionCatalog = catalogResult?.getOrDefault(current.piExtensionCatalog)
+                    ?: current.piExtensionCatalog,
+                isLoadingPiExtensions = false,
+                piExtensionCatalogError = catalogResult?.exceptionOrNull()?.userFacingMessage()
+                    ?: if (loadCatalog) "" else current.piExtensionCatalogError,
+            )
+        }
+        installedResult.exceptionOrNull()?.let { throwable ->
+            emitTransientMessage(
+                uiString(
+                    R.string.message_pi_extension_operation_failed,
+                    throwable.userFacingMessage(),
+                )
+            )
         }
     }
 

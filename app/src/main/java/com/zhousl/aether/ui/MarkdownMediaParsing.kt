@@ -6,7 +6,7 @@ import java.io.File
 import java.net.URLDecoder
 
 internal fun defaultMarkdownImageLayout(): MarkdownMediaLayout = MarkdownMediaLayout(
-    minHeightDp = DefaultImageMinHeightDp,
+    minHeightDp = 1,
     maxHeightDp = DefaultImageMaxHeightDp,
     fit = MarkdownMediaFit.Contain,
 )
@@ -64,6 +64,90 @@ internal fun parseMarkdownImage(text: String): MarkdownImageSpec? {
             defaults = defaultMarkdownImageLayout(),
         ),
     )
+}
+
+internal fun parseMarkdownImageSequence(text: String): List<MarkdownImageSpec>? {
+    val images = mutableListOf<MarkdownImageSpec>()
+    var index = 0
+
+    while (index < text.length) {
+        while (index < text.length && text[index].isWhitespace()) index++
+        if (index >= text.length) break
+
+        val token = parseMarkdownImageToken(text, index) ?: return null
+        images += token.image
+        index = token.endExclusive
+    }
+
+    return images.takeIf(List<MarkdownImageSpec>::isNotEmpty)
+}
+
+private data class MarkdownImageToken(
+    val image: MarkdownImageSpec,
+    val endExclusive: Int,
+)
+
+private fun parseMarkdownImageToken(
+    text: String,
+    startIndex: Int,
+): MarkdownImageToken? {
+    if (text.startsWith("[![", startIndex)) {
+        val inner = parseDirectMarkdownImageToken(text, startIndex + 1) ?: return null
+        if (inner.endExclusive >= text.length || text[inner.endExclusive] != ']') return null
+        val destinationStart = inner.endExclusive + 1
+        if (destinationStart >= text.length || text[destinationStart] != '(') return null
+        val outerEnd = findMarkdownDestinationEnd(text, destinationStart) ?: return null
+        return MarkdownImageToken(inner.image, outerEnd + 1)
+    }
+
+    return parseDirectMarkdownImageToken(text, startIndex)
+}
+
+private fun parseDirectMarkdownImageToken(
+    text: String,
+    startIndex: Int,
+): MarkdownImageToken? {
+    if (!text.startsWith("![", startIndex)) return null
+    val destinationMarker = text.indexOf("](", startIndex + 2)
+    if (destinationMarker < 0) return null
+    val destinationStart = destinationMarker + 1
+    val destinationEnd = findMarkdownDestinationEnd(text, destinationStart) ?: return null
+
+    var endExclusive = destinationEnd + 1
+    if (endExclusive < text.length && text[endExclusive] == '{') {
+        val attributesEnd = text.indexOf('}', endExclusive + 1)
+        if (attributesEnd < 0) return null
+        endExclusive = attributesEnd + 1
+    }
+
+    val image = parseMarkdownImage(text.substring(startIndex, endExclusive)) ?: return null
+    return MarkdownImageToken(image, endExclusive)
+}
+
+private fun findMarkdownDestinationEnd(
+    text: String,
+    openingParenthesis: Int,
+): Int? {
+    if (openingParenthesis !in text.indices || text[openingParenthesis] != '(') return null
+
+    var nestedParentheses = 0
+    var index = openingParenthesis + 1
+    while (index < text.length) {
+        val character = text[index]
+        if (character == '\\' && index + 1 < text.length) {
+            index += 2
+            continue
+        }
+        when (character) {
+            '(' -> nestedParentheses++
+            ')' -> {
+                if (nestedParentheses == 0) return index
+                nestedParentheses--
+            }
+        }
+        index++
+    }
+    return null
 }
 
 internal fun parseMarkdownCodeFenceHeader(

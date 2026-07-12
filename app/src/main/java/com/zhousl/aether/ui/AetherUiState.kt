@@ -9,6 +9,9 @@ import com.zhousl.aether.data.ChatUsageStatisticsSnapshot
 import com.zhousl.aether.data.InstalledSkill
 import com.zhousl.aether.data.LlmProviderConfig
 import com.zhousl.aether.data.McpServerConfig
+import com.zhousl.aether.data.InstalledPiExtension
+import com.zhousl.aether.data.PiExtensionCatalogEntry
+import com.zhousl.aether.data.PiPackageDetails
 import com.zhousl.aether.data.RootSetupState
 import com.zhousl.aether.data.ScheduledTask
 import com.zhousl.aether.data.SessionExecutionState
@@ -255,6 +258,15 @@ data class AetherUiState(
     val rootSetupState: RootSetupState = RootSetupState(),
     val rootSetupProgressReturnPage: RootSetupProgressReturnPage? = null,
     val installedSkills: List<InstalledSkill> = emptyList(),
+    val installedPiExtensions: List<InstalledPiExtension> = emptyList(),
+    val piExtensionCatalog: List<PiExtensionCatalogEntry> = emptyList(),
+    val isLoadingPiExtensions: Boolean = false,
+    val piExtensionCatalogError: String = "",
+    val piExtensionOperationSource: String = "",
+    val selectedPiPackageDetails: PiPackageDetails? = null,
+    val selectedPiPackageSource: String = "",
+    val isLoadingPiPackageDetails: Boolean = false,
+    val piPackageDetailsError: String = "",
     val mcpServers: List<McpServerConfig> = emptyList(),
     val scheduledTasks: List<ScheduledTask> = emptyList(),
     val providerConfigs: List<LlmProviderConfig> = emptyList(),
