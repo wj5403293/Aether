@@ -63,6 +63,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.ArrowDropDown
 import androidx.compose.material.icons.rounded.ArrowUpward
 import androidx.compose.material.icons.rounded.AttachFile
@@ -299,6 +300,9 @@ fun ConversationScreen(
     modelOptions: List<ProviderModelOption>,
     modelCatalogInfo: Map<String, ModelCatalogInfo>,
     selectedModelKey: String,
+    reasoningEffort: String,
+    thinkingLevelsByProviderModel: Map<String, List<String>>,
+    thinkingLevelClampsByProviderModel: Map<String, Map<String, String>>,
     availableSkills: List<InstalledSkill>,
     availableMcpServers: List<McpServerConfig>,
     selectedSkillIds: List<String>,
@@ -313,6 +317,8 @@ fun ConversationScreen(
     showTermuxSetupNotice: Boolean,
     onInputChanged: (String) -> Unit,
     onModelSelected: (String) -> Unit,
+    onModelSelectorOpened: () -> Unit,
+    onReasoningEffortSelected: (String) -> Unit,
     onRemoveDraftAttachment: (String) -> Unit,
     onSetSkillSelected: (String, Boolean) -> Unit,
     onSetMcpServerSelected: (String, Boolean) -> Unit,
@@ -698,8 +704,13 @@ fun ConversationScreen(
                 modelOptions = modelOptions,
                 modelCatalogInfo = modelCatalogInfo,
                 selectedModelKey = selectedModelKey,
+                reasoningEffort = reasoningEffort,
+                thinkingLevelsByProviderModel = thinkingLevelsByProviderModel,
+                thinkingLevelClampsByProviderModel = thinkingLevelClampsByProviderModel,
                 onMenu = onMenu,
                 onModelSelected = onModelSelected,
+                onModelSelectorOpened = onModelSelectorOpened,
+                onReasoningEffortSelected = onReasoningEffortSelected,
                 onNewChat = onNewChat,
             )
 
@@ -771,8 +782,13 @@ private fun ConversationTopOverlay(
     modelOptions: List<ProviderModelOption>,
     modelCatalogInfo: Map<String, ModelCatalogInfo>,
     selectedModelKey: String,
+    reasoningEffort: String,
+    thinkingLevelsByProviderModel: Map<String, List<String>>,
+    thinkingLevelClampsByProviderModel: Map<String, Map<String, String>>,
     onMenu: () -> Unit,
     onModelSelected: (String) -> Unit,
+    onModelSelectorOpened: () -> Unit,
+    onReasoningEffortSelected: (String) -> Unit,
     onNewChat: () -> Unit,
 ) {
     Column(
@@ -788,8 +804,13 @@ private fun ConversationTopOverlay(
                 modelOptions = modelOptions,
                 modelCatalogInfo = modelCatalogInfo,
                 selectedModelKey = selectedModelKey,
+                reasoningEffort = reasoningEffort,
+                thinkingLevelsByProviderModel = thinkingLevelsByProviderModel,
+                thinkingLevelClampsByProviderModel = thinkingLevelClampsByProviderModel,
                 onMenu = onMenu,
                 onModelSelected = onModelSelected,
+                onModelSelectorOpened = onModelSelectorOpened,
+                onReasoningEffortSelected = onReasoningEffortSelected,
                 onNewChat = onNewChat,
             )
         }
@@ -808,8 +829,13 @@ private fun ConversationTopBar(
     modelOptions: List<ProviderModelOption>,
     modelCatalogInfo: Map<String, ModelCatalogInfo>,
     selectedModelKey: String,
+    reasoningEffort: String,
+    thinkingLevelsByProviderModel: Map<String, List<String>>,
+    thinkingLevelClampsByProviderModel: Map<String, Map<String, String>>,
     onMenu: () -> Unit,
     onModelSelected: (String) -> Unit,
+    onModelSelectorOpened: () -> Unit,
+    onReasoningEffortSelected: (String) -> Unit,
     onNewChat: () -> Unit,
 ) {
     Row(
@@ -831,7 +857,12 @@ private fun ConversationTopBar(
             options = modelOptions,
             modelCatalogInfo = modelCatalogInfo,
             selectedModelKey = selectedModelKey,
+            reasoningEffort = reasoningEffort,
+            thinkingLevelsByProviderModel = thinkingLevelsByProviderModel,
+            thinkingLevelClampsByProviderModel = thinkingLevelClampsByProviderModel,
             onSelected = onModelSelected,
+            onOpened = onModelSelectorOpened,
+            onReasoningEffortSelected = onReasoningEffortSelected,
             modifier = Modifier
                 .weight(1f)
                 .padding(horizontal = 12.dp),
@@ -852,16 +883,29 @@ private fun ConversationModelSelector(
     options: List<ProviderModelOption>,
     modelCatalogInfo: Map<String, ModelCatalogInfo>,
     selectedModelKey: String,
+    reasoningEffort: String,
+    thinkingLevelsByProviderModel: Map<String, List<String>>,
+    thinkingLevelClampsByProviderModel: Map<String, Map<String, String>>,
     onSelected: (String) -> Unit,
+    onOpened: () -> Unit,
+    onReasoningEffortSelected: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var expanded by remember { mutableStateOf(false) }
+    var showingReasoningEffort by remember { mutableStateOf(false) }
     var anchorHeightPx by remember { mutableIntStateOf(0) }
     val menuVisibility = remember { MutableTransitionState(false) }
     menuVisibility.targetState = expanded
     val density = LocalDensity.current
     val menuWidth = 242.dp
     val selectedOption = options.firstOrNull { it.key == selectedModelKey } ?: options.firstOrNull()
+    val supportedThinkingLevels = selectedOption?.let { option ->
+        thinkingLevelsByProviderModel["${option.piProviderId}/${option.modelId}"]
+    }.orEmpty()
+    val effectiveReasoningEffort = selectedOption?.let { option ->
+        thinkingLevelClampsByProviderModel["${option.piProviderId}/${option.modelId}"]
+            ?.get(reasoningEffort)
+    } ?: reasoningEffort
     val fallbackLabel = stringResource(R.string.chat_select_model)
     val selectedDisplay = remember(selectedOption, modelCatalogInfo) {
         selectedOption?.let { option ->
@@ -885,7 +929,11 @@ private fun ConversationModelSelector(
                 .shadow(4.dp, RoundedCornerShape(999.dp), ambientColor = ChatGptControlShadow, spotColor = ChatGptControlShadow)
                 .clip(RoundedCornerShape(999.dp))
                 .background(AetherSurface.copy(alpha = 0.96f))
-                .clickable(enabled = options.isNotEmpty()) { expanded = true },
+                .clickable(enabled = options.isNotEmpty()) {
+                    onOpened()
+                    showingReasoningEffort = false
+                    expanded = true
+                },
             verticalAlignment = Alignment.CenterVertically,
         ) {
             if (selectedDisplay != null) {
@@ -940,26 +988,152 @@ private fun ConversationModelSelector(
                             .padding(vertical = 5.dp),
                         horizontalAlignment = Alignment.Start,
                     ) {
-                        Column(
-                            modifier = Modifier
-                                .heightIn(max = 312.dp)
-                                .verticalScroll(rememberScrollState()),
-                            horizontalAlignment = Alignment.Start,
-                        ) {
-                            options.forEach { option ->
-                                val isSelected = option.key == selectedOption?.key
-                                ConversationModelMenuRow(
-                                    label = option.chatLabel,
-                                    catalogInfo = modelCatalogInfo[option.key],
-                                    selected = isSelected,
-                                    onClick = {
-                                        expanded = false
-                                        onSelected(option.key)
-                                    },
+                        if (showingReasoningEffort && supportedThinkingLevels.isNotEmpty()) {
+                            ConversationReasoningEffortMenu(
+                                efforts = supportedThinkingLevels,
+                                selectedEffort = effectiveReasoningEffort,
+                                onBack = { showingReasoningEffort = false },
+                                onSelected = { effort ->
+                                    onReasoningEffortSelected(effort)
+                                    showingReasoningEffort = false
+                                },
+                            )
+                        } else {
+                            if (supportedThinkingLevels.isNotEmpty()) {
+                                ConversationReasoningEffortEntry(
+                                    effort = effectiveReasoningEffort,
+                                    onClick = { showingReasoningEffort = true },
                                 )
+                            }
+                            Column(
+                                modifier = Modifier
+                                    .heightIn(max = 312.dp)
+                                    .verticalScroll(rememberScrollState()),
+                                horizontalAlignment = Alignment.Start,
+                            ) {
+                                options.forEach { option ->
+                                    ConversationModelMenuRow(
+                                        label = option.chatLabel,
+                                        catalogInfo = modelCatalogInfo[option.key],
+                                        selected = option.key == selectedOption?.key,
+                                        onClick = {
+                                            expanded = false
+                                            onSelected(option.key)
+                                        },
+                                    )
+                                }
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun reasoningEffortLabel(effort: String): String = when (effort.trim().lowercase()) {
+    "off" -> stringResource(R.string.chat_reasoning_effort_off)
+    "minimal" -> stringResource(R.string.chat_reasoning_effort_minimal)
+    "low" -> stringResource(R.string.chat_reasoning_effort_low)
+    "medium" -> stringResource(R.string.chat_reasoning_effort_medium)
+    "high" -> stringResource(R.string.chat_reasoning_effort_high)
+    "xhigh" -> stringResource(R.string.chat_reasoning_effort_xhigh)
+    "max" -> stringResource(R.string.chat_reasoning_effort_max)
+    else -> effort.trim().replaceFirstChar { it.titlecase() }
+}
+
+@Composable
+private fun ConversationReasoningEffortEntry(
+    effort: String,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = stringResource(R.string.chat_reasoning_effort),
+                style = MaterialTheme.typography.bodyMedium,
+                color = AetherOnSurface,
+            )
+            Text(
+                text = reasoningEffortLabel(effort),
+                style = MaterialTheme.typography.bodySmall,
+                color = AetherOnSurfaceVariant,
+            )
+        }
+        Icon(
+            imageVector = Icons.Rounded.ArrowDropDown,
+            contentDescription = stringResource(R.string.chat_reasoning_effort_choose),
+            tint = AetherOnSurfaceVariant,
+        )
+    }
+}
+
+@Composable
+private fun ConversationReasoningEffortMenu(
+    efforts: List<String>,
+    selectedEffort: String,
+    onBack: () -> Unit,
+    onSelected: (String) -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onBack)
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Icon(
+            imageVector = Icons.Rounded.ArrowBack,
+            contentDescription = stringResource(R.string.common_back),
+            tint = AetherOnSurfaceVariant,
+            modifier = Modifier.size(18.dp),
+        )
+        Text(
+            text = stringResource(R.string.chat_reasoning_effort),
+            style = MaterialTheme.typography.bodyMedium,
+            color = AetherOnSurface,
+        )
+    }
+    Column(
+        modifier = Modifier
+            .heightIn(max = 312.dp)
+            .verticalScroll(rememberScrollState()),
+    ) {
+        efforts.forEach { effort ->
+            val selected = effort == selectedEffort
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 5.dp, vertical = 1.dp)
+                    .clip(RoundedCornerShape(15.dp))
+                    .background(
+                        if (selected) AetherOnSurface.copy(alpha = 0.06f) else Color.Transparent,
+                    )
+                    .clickable { onSelected(effort) }
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = reasoningEffortLabel(effort),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = AetherOnSurface,
+                    modifier = Modifier.weight(1f),
+                )
+                if (selected) {
+                    Icon(
+                        imageVector = Icons.Rounded.Check,
+                        contentDescription = null,
+                        tint = AetherOnSurfaceVariant,
+                        modifier = Modifier.size(16.dp),
+                    )
                 }
             }
         }

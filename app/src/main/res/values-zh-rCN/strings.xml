@@ -138,6 +138,8 @@
     <string name="chat_attachment_count_one">1 个附件</string>
     <string name="chat_attachment_count_other">%1$d 个附件</string>
     <string name="chat_select_model">选择模型</string>
+    <string name="chat_reasoning_effort">推理强度</string>
+    <string name="chat_reasoning_effort_choose">选择推理强度</string>
     <string name="chat_first_prompt_ready_title">你的第一条提示已准备好</string>
     <string name="chat_first_prompt_ready_subtitle">点击发送来测试 Aether。</string>
     <string name="chat_editing_earlier_message_title">正在编辑较早的消息</string>
