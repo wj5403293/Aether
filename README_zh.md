@@ -38,7 +38,7 @@
 
 > 鹏之徙于南冥也，水击三千里，抟扶摇而上者九万里，去以六月息者也。
 
-**Aether 扶摇** 致力于为 Android 设备提供现代化的本地 AI Agent 体验。告别臃肿的虚拟机配置与繁杂的终端界面，在保持极简轻量 UI 的同时，提供了极其强大的扩展性与无缝的工具调用体验。
+**Aether 扶摇** 致力于为 Android 设备提供现代化的本地 AI Agent 体验。基于 Pi 框架，在保持极简轻量 UI 的同时，提供了极其强大的扩展性与无缝的工具调用体验。
 
 ---
 
@@ -61,28 +61,17 @@ Aether 的 UI 和交互大量参考了 ChatGPT、Codex CLI/App、Gemini、Poco A
 ## ✨ 核心特性
 
 - **超高颜值，丝滑交互**: 凝聚 ChatGPT 等优秀应用的设计精华，打造极简、现代、优雅的界面。
-- **完整的 Skill/MCP 支持**: 全量支持 Anthropic Agent Skills 和 Model Context Protocol，轻松连接 Google Search、GitHub、Local Files 等数据源。
-- **轻量集成 Termux**: 直接连接 Termux 执行 Bash 指令，不采用厚重的内置 Ubuntu/Apline 虚拟机的方案，更自由、更高效。
-- **可插拔的 GUI Agent**: GUI Agent 按需启动，处理无法使用指令的复杂交互。
-
----
-
-## 🛠️ 技术栈
-
-- **Core**: Kotlin / Jetpack Compose / Coroutines
-- **LLM**: OpenAI (Responses) / OpenAI (Chat Completions) / Anthropic Messages / Vertex AI (Express Mode)
-- **Extension**: MCP (stdio, HTTP) / Agent Skills
-- **Tooling**: Termux Integration / WebTools (JSoup, Flexmark)
-- **Data**: DataStore / YAML configuration
+- **Pi Harness 内核**: 采用 Pi 框架，拥有最广泛的 Model Provider 兼容性，以及最轻量、最高效的 Agent 执行引擎。
+- **内置 Alpine 虚拟机**: 自动安装 Alpine Linux 运行环境，开箱即用，支持各种 Linux 工具与命令行操作。
+- **扩展主机控制**: 支持可选的 Shizuku 与 Termux 扩展，用于直接操纵和控制手机系统。
 
 ---
 
 ## 🚀 快速开始
 
 ### 前置要求
-- Android 12 或更高版本
-- 可选：已 Root 或已安装 [Shizuku](https://shizuku.rikka.app/)
-- 可选：已安装 [Termux](https://termux.dev/)
+- Android 13 或更高版本
+- 可选（用于控制手机）：已 Root 或已安装 [Shizuku](https://shizuku.rikka.app/)，或已安装 [Termux](https://termux.dev/)
 
 ### 安装步骤
 1. 下载最新的 [Release APK](https://github.com/Zhou-Shilin/Aether/releases) 或 [Nightly APK artifact](https://nightly.link/Zhou-Shilin/Aether/workflows/build-nightly-apk.yml/main/Aether-nightly.zip)。

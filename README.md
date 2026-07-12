@@ -13,7 +13,6 @@
   <a href="README_zh.md">中文</a> •
   <a href="#-visuals-&-experience">Visuals & Experience</a> •
   <a href="#-core-features">Core Features</a> •
-  <a href="#-tech-stack">Tech Stack</a> •
   <a href="#-quick-start">Quick Start</a>
 </p>
 
@@ -34,7 +33,7 @@
 
 > "When the great Peng bird journeys to the Southern Ocean, it flaps the water for three thousand miles, spiraling upward on a whirlwind (*Aether/Fuyao*) to ninety thousand miles, and travels for six months before resting."
 
-**Aether** is dedicated to bringing a modern, local AI Agent experience to Android devices. Say goodbye to bloated virtual machine configurations and cumbersome terminal interfaces. Aether pairs a minimalist, lightweight UI with immense extensibility and a seamless tool-calling experience.
+**Aether** is dedicated to bringing a modern, local AI Agent experience to Android devices. Built on the robust Pi framework, it pairs a minimalist, lightweight UI with immense extensibility and a seamless tool-calling experience.
 
 ---
 
@@ -57,16 +56,15 @@ Aether's UI and interactions are heavily inspired by excellent, mature applicati
 ## ✨ Core Features
 
 - **Stunning UI & Silky Smooth Interactions**: Distilling the design essence of top-tier apps like ChatGPT to create a minimalist, modern, and elegant interface.
-- **Comprehensive Skill/MCP Support**: Fully supports Anthropic Agent Skills and the Model Context Protocol (MCP), effortlessly connecting to data sources like Google Search, GitHub, and local files.
-- **Lightweight Termux Integration**: Connects directly to Termux for Bash command execution. Avoids the heavy, built-in Ubuntu/Alpine VM approach for greater freedom and efficiency.
-- **Pluggable GUI Agent**: Launches on demand to handle complex visual interactions where standard CLI commands fall short.
+- **Pi Harness Kernel**: Powered by the Pi framework, providing the widest LLM provider compatibility and a lightweight, highly efficient Agent execution engine.
+- **Built-in Alpine VM**: Includes an automatically installed Alpine Linux environment to run shell commands and tools out of the box.
+- **Extensible Host Control**: Supports optional Shizuku and Termux integration for direct device manipulation and automation.
 
 ## 🚀 Quick Start
 
 ### Prerequisites
-- Android 12 or higher
-- Optional: Rooted device or [Shizuku](https://shizuku.rikka.app/) installed
-- Optional: [Termux](https://termux.dev/) installed
+- Android 13 or higher
+- Optional (for device control): Rooted device or [Shizuku](https://shizuku.rikka.app/) installed, or [Termux](https://termux.dev/) installed
 
 ### Installation
 1. Download the latest [Release APK](https://github.com/Zhou-Shilin/Aether/releases) or [Nightly APK artifact](https://nightly.link/Zhou-Shilin/Aether/workflows/build-nightly-apk.yml/main/Aether-nightly.zip).
