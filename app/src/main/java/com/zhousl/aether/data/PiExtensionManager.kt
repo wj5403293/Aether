@@ -12,6 +12,7 @@ import java.util.Locale
 import java.util.UUID
 import java.util.zip.ZipInputStream
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -48,9 +49,12 @@ data class InstalledPiExtension(
     val description: String = "",
     val installedPath: String = "",
     val extensionCount: Int = 0,
+    val aetherExtensionCount: Int = 0,
+    val nativeEntrypointCount: Int = 0,
     val skillCount: Int = 0,
     val promptCount: Int = 0,
     val themeCount: Int = 0,
+    val isEnabled: Boolean = true,
     val kind: PiExtensionInstallKind,
 )
 
@@ -294,6 +298,7 @@ class PiExtensionManager(
     private val alpineRuntime: AlpineRuntime,
     private val piKernelBridge: PiKernelBridge,
     private val skillManager: AgentSkillManager,
+    private val stateRepository: PiExtensionStateRepository,
     private val httpClient: OkHttpClient = OkHttpClient(),
 ) {
     private val appContext = context.applicationContext
@@ -349,6 +354,7 @@ class PiExtensionManager(
 
     suspend fun listInstalled(): Result<List<InstalledPiExtension>> = withContext(Dispatchers.IO) {
         runCatching {
+            val disabledIds = stateRepository.disabledExtensionIds.first()
             val packageResponse = piKernelBridge.listExtensionPackages()
             val packages = packageResponse.optJSONArray("packages")
             val packageSkills = mutableListOf<PiPackageSkillSource>()
@@ -369,6 +375,8 @@ class PiExtensionManager(
                                 description = item.optString("description"),
                                 installedPath = item.optString("installed_path"),
                                 extensionCount = item.optInt("extension_count"),
+                                aetherExtensionCount = item.optInt("aether_extension_count"),
+                                nativeEntrypointCount = item.optInt("native_entrypoint_count"),
                                 skillCount = item.optInt("skill_count"),
                                 promptCount = item.optInt("prompt_count"),
                                 themeCount = item.optInt("theme_count"),
@@ -397,6 +405,9 @@ class PiExtensionManager(
             }
             skillManager.syncPiPackageSkills(packageSkills).getOrThrow()
             (installedPackages + listImportedExtensions())
+                .map { extension ->
+                    extension.copy(isEnabled = extension.id !in disabledIds)
+                }
                 .distinctBy(InstalledPiExtension::id)
                 .sortedBy { it.name.lowercase(Locale.US) }
         }
@@ -404,23 +415,27 @@ class PiExtensionManager(
 
     suspend fun installPackage(source: String): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
-            piKernelBridge.installExtensionPackage(source)
+            piKernelBridge.installExtensionPackage(source, stateRepository.loadOptions())
             Unit
         }
     }
 
     suspend fun updatePackage(source: String): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
-            piKernelBridge.updateExtensionPackage(source)
+            piKernelBridge.updateExtensionPackage(source, stateRepository.loadOptions())
             Unit
         }
     }
 
     suspend fun remove(extension: InstalledPiExtension): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
+            stateRepository.setEnabled(extension.id, enabled = true)
             when (extension.kind) {
                 PiExtensionInstallKind.Package -> {
-                    val response = piKernelBridge.removeExtensionPackage(extension.source)
+                    val response = piKernelBridge.removeExtensionPackage(
+                        extension.source,
+                        stateRepository.loadOptions(),
+                    )
                     require(response.optBoolean("removed")) {
                         "No installed Pi extension matched ${extension.source}."
                     }
@@ -428,12 +443,25 @@ class PiExtensionManager(
 
                 PiExtensionInstallKind.Imported -> {
                     removeImportedExtension(extension.installedPath)
-                    piKernelBridge.reloadAllExtensions()
+                    piKernelBridge.reloadAllExtensions(stateRepository.loadOptions())
                 }
             }
             Unit
         }
     }
+
+    suspend fun setEnabled(
+        extension: InstalledPiExtension,
+        enabled: Boolean,
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            stateRepository.setEnabled(extension.id, enabled)
+            piKernelBridge.reloadAllExtensions(stateRepository.loadOptions())
+            Unit
+        }
+    }
+
+    suspend fun loadOptions(): PiExtensionLoadOptions = stateRepository.loadOptions()
 
     suspend fun importFromUri(uri: Uri): Result<InstalledPiExtension> = withContext(Dispatchers.IO) {
         runCatching {
@@ -444,9 +472,9 @@ class PiExtensionManager(
             } else {
                 importExtensionFile(uri, displayName, importRoot)
             }
-            piKernelBridge.reloadAllExtensions()
+            piKernelBridge.reloadAllExtensions(stateRepository.loadOptions())
             importedExtension(installedFile, "aether")
-                ?: error("The imported source did not contain a loadable Pi extension.")
+                ?: error("The imported source did not contain a loadable Aether or Pi extension.")
         }
     }
 
@@ -464,12 +492,6 @@ class PiExtensionManager(
     }
 
     private fun importedExtension(file: File, scope: String): InstalledPiExtension? {
-        val entryCount = when {
-            file.isFile && ExtensionFilePattern.matches(file.name) -> 1
-            file.isDirectory -> packageExtensionEntries(file).size
-            else -> 0
-        }
-        if (entryCount == 0) return null
         val manifest = if (file.isDirectory) {
             runCatching {
                 File(file, "package.json").takeIf(File::isFile)
@@ -479,6 +501,22 @@ class PiExtensionManager(
         } else {
             null
         }
+        val piEntryCount = when {
+            file.isFile && ExtensionFilePattern.matches(file.name) -> 1
+            file.isDirectory -> packageExtensionEntries(file, "pi").size
+            else -> 0
+        }
+        val aetherEntryCount = if (file.isDirectory) {
+            packageExtensionEntries(file, "aether").size
+        } else {
+            0
+        }
+        val nativeEntrypointCount = manifest.nativeEntrypoints().size
+        if (
+            piEntryCount == 0 &&
+            aetherEntryCount == 0 &&
+            nativeEntrypointCount == 0
+        ) return null
         return InstalledPiExtension(
             id = "import:$scope:${file.canonicalPath}",
             name = manifest?.optString("name").orEmpty().ifBlank { file.nameWithoutExtension },
@@ -486,19 +524,24 @@ class PiExtensionManager(
             version = manifest?.optString("version").orEmpty(),
             description = manifest?.optString("description").orEmpty(),
             installedPath = file.canonicalPath,
-            extensionCount = entryCount,
+            extensionCount = piEntryCount,
+            aetherExtensionCount = aetherEntryCount,
+            nativeEntrypointCount = nativeEntrypointCount,
             kind = PiExtensionInstallKind.Imported,
         )
     }
 
-    private fun packageExtensionEntries(directory: File): List<File> {
+    private fun packageExtensionEntries(
+        directory: File,
+        namespace: String = "pi",
+    ): List<File> {
         val manifest = runCatching {
             File(directory, "package.json").takeIf(File::isFile)
                 ?.readText(Charsets.UTF_8)
                 ?.let(::JSONObject)
         }.getOrNull()
         val configuredEntries = manifest
-            ?.optJSONObject("pi")
+            ?.optJSONObject(namespace)
             ?.optJSONArray("extensions")
             ?.let { extensions ->
                 buildList {
@@ -513,6 +556,9 @@ class PiExtensionManager(
             .orEmpty()
             .filter(File::isFile)
         if (configuredEntries.isNotEmpty()) return configuredEntries
+        if (namespace != "pi" || manifest?.optJSONObject("aether") != null) {
+            return emptyList()
+        }
         return ExtensionIndexNames
             .map { File(directory, it) }
             .filter(File::isFile)
@@ -641,16 +687,28 @@ class PiExtensionManager(
     }
 
     private fun locatePackageRoot(extractionRoot: File): File {
-        if (packageExtensionEntries(extractionRoot).isNotEmpty()) return extractionRoot
+        if (packageContainsExtensions(extractionRoot)) return extractionRoot
         val candidates = extractionRoot.listFiles()
             .orEmpty()
             .filter { it.isDirectory && it.name != "__MACOSX" }
         val candidate = candidates.singleOrNull()
-            ?.takeIf { packageExtensionEntries(it).isNotEmpty() }
+            ?.takeIf(::packageContainsExtensions)
         return candidate ?: error(
-            "The archive must contain package.json with pi.extensions or an index extension file."
+            "The archive must contain package.json with pi.extensions, aether.extensions, or aether.native, or an index extension file."
         )
     }
+
+    private fun packageContainsExtensions(directory: File): Boolean =
+        packageExtensionEntries(directory, "pi").isNotEmpty() ||
+            packageExtensionEntries(directory, "aether").isNotEmpty() ||
+            runCatching {
+                File(directory, "package.json")
+                    .takeIf(File::isFile)
+                    ?.readText(Charsets.UTF_8)
+                    ?.let(::JSONObject)
+                    .nativeEntrypoints()
+                    .isNotEmpty()
+            }.getOrDefault(false)
 
     private suspend fun removeImportedExtension(installedPath: String) {
         val target = File(installedPath).canonicalFile
@@ -701,6 +759,28 @@ private fun sanitizeDirectoryName(raw: String): String =
         .replace(Regex("[^a-z0-9._-]+"), "-")
         .trim('-', '.')
         .ifBlank { "extension-${UUID.randomUUID()}" }
+
+private fun JSONObject?.nativeEntrypoints(): List<String> {
+    val native = this
+        ?.optJSONObject("aether")
+        ?.optJSONObject("native")
+        ?: return emptyList()
+    val entries = native.optJSONArray("entrypoints")
+    if (entries != null) {
+        return buildList {
+            for (index in 0 until entries.length()) {
+                entries.optString(index).trim().takeIf(String::isNotBlank)?.let(::add)
+            }
+        }
+    }
+    return native.optString("entrypoints")
+        .trim()
+        .ifBlank { native.optString("entrypoint").trim() }
+        .trim()
+        .takeIf(String::isNotBlank)
+        ?.let(::listOf)
+        .orEmpty()
+}
 
 private fun copyWithLimit(
     input: InputStream,

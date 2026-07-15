@@ -850,7 +850,7 @@
     <string name="settings_old_command_history_retention_hours_value_description">Default: 6 hours. Range: 1–168.</string>
     <string name="settings_pi_extensions">Extensions</string>
     <string name="settings_pi_extensions_count_configured">%1$d installed</string>
-    <string name="settings_pi_extensions_warning">Pi packages can add extensions, skills, prompts, themes, and npm dependencies. They run with access to the agent and workspace, so install packages you trust.</string>
+    <string name="settings_pi_extensions_warning">Extension packages can modify the Pi agent and Aether’s Android UI or app logic. They run as trusted code with broad access to the agent, app host, runtimes, and workspace.</string>
     <string name="settings_extension_discover">Discover</string>
     <string name="settings_extension_installed">Installed</string>
     <string name="settings_search_extensions">Search packages</string>
@@ -873,6 +873,8 @@
     <string name="settings_package_size">Size</string>
     <string name="settings_package_dependencies">Dependencies</string>
     <string name="settings_package_extensions_count">%1$d extensions</string>
+    <string name="settings_package_aether_extensions_count">%1$d Aether UI extensions</string>
+    <string name="settings_package_native_mods_count">%1$d native entrypoints</string>
     <string name="settings_package_skills_count">%1$d skills</string>
     <string name="settings_package_prompts_count">%1$d prompts</string>
     <string name="settings_package_themes_count">%1$d themes</string>
@@ -889,8 +891,19 @@
     <string name="settings_install_anyway">Install anyway</string>
     <string name="settings_install">Install</string>
     <string name="settings_update">Update</string>
+    <string name="settings_extension_enabled">Extension enabled</string>
+    <string name="settings_extension_disabled">Extension disabled</string>
     <string name="action_retry">Retry</string>
     <string name="message_pi_extension_imported">Imported extension %1$s</string>
     <string name="message_pi_extension_updated">Extension changes applied</string>
     <string name="message_pi_extension_operation_failed">Extension operation failed: %1$s</string>
+    <string name="settings_native_mod_safe_mode_title">Native Mod Safe Mode</string>
+    <string name="settings_native_mod_safe_mode_body">A previous startup ended before Aether became stable, so Kotlin/DEX mods were skipped to stop a crash loop. Script extensions remain available.</string>
+    <string name="settings_native_mod_suspected">Last loading entrypoint: %1$s</string>
+    <string name="settings_native_mod_active_title">Native Mod Kernel</string>
+    <string name="settings_native_mod_active_summary">%1$d entrypoints loaded · %2$d packages discovered. Native code can replace services and Compose components and requires an app restart after package changes.</string>
+    <string name="settings_native_mod_failure">%1$s: %2$s</string>
+    <string name="settings_native_mod_restart_required">Restart Aether to apply this Native Mod setting.</string>
+    <string name="settings_native_mod_enable_next_start">Enable Native Mods on next start</string>
+    <string name="settings_native_mod_disable_next_start">Start in Native Mod Safe Mode next time</string>
 </resources>

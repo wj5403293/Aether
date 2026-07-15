@@ -86,6 +86,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -109,7 +110,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
-import androidx.core.content.FileProvider
+import com.zhousl.aether.AetherApplication
 import com.zhousl.aether.data.AetherPrivacyPolicyUrl
 import com.zhousl.aether.data.AetherWebsiteUrl
 import com.zhousl.aether.data.AgentModeAuthorizationMethod
@@ -117,10 +118,10 @@ import com.zhousl.aether.data.AppLanguage
 import com.zhousl.aether.data.AppSettings
 import com.zhousl.aether.data.AutomaticModelPurpose
 import com.zhousl.aether.data.ProviderModelOption
-import com.zhousl.aether.data.WorkspaceFileBridge
 import com.zhousl.aether.data.availableModelOptions
 import com.zhousl.aether.data.isOnboardingComplete
 import com.zhousl.aether.data.resolveAutomaticModelKey
+import com.zhousl.aether.mod.AetherNativeModState
 import com.zhousl.aether.termux.TermuxContract
 import com.zhousl.aether.termux.TermuxSetupIssue
 import com.zhousl.aether.termux.TermuxSetupState
@@ -137,7 +138,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.File
+import org.json.JSONArray
+import org.json.JSONObject
 
 
 private data class SuggestionAction(
@@ -153,14 +155,56 @@ private sealed interface PendingSaveTarget {
 
 private const val ScreenTransitionDuration = 320
 private val ScreenTransitionEasing = CubicBezierEasing(0.22f, 0.84f, 0.18f, 1f)
-private const val AssistantLocalFileOpenByteLimit = 32 * 1024 * 1024
-private const val AssistantLocalFileCacheDirectory = "assistant-local-open"
 private const val PrivacyPolicyAnnotationTag = "privacy_policy"
 
 private fun AppScreen.depth(): Int = when (this) {
     AppScreen.Onboarding -> 0
     AppScreen.Chat -> 1
     AppScreen.Settings -> 2
+}
+
+private fun AetherUiState.toAetherExtensionContext(): JSONObject {
+    val activeSession = sessions.firstOrNull { it.id == currentSessionId }
+    val execution = sessionExecutionStates[currentSessionId]
+    val selectedSkillIds = activeSession?.selectedSkillIds ?: draftSelectedSkillIds
+    val selectedMcpServerIds = activeSession?.activeMcpServerIds ?: draftSelectedMcpServerIds
+    return JSONObject().apply {
+        put("screen", currentScreen.name.lowercase())
+        put("session_id", currentSessionId)
+        put("session_title", activeSession?.title.orEmpty())
+        put("message_count", activeSession?.messages?.size ?: 0)
+        put("draft_input", draftInput)
+        put("is_running", execution?.isRunning == true)
+        put("is_editing", editingMessageId != null)
+        put("selected_model_key", activeSession?.selectedModelKey ?: draftSelectedModelKey)
+        put("agent_mode_enabled", activeSession?.agentModeEnabled ?: draftAgentModeEnabled)
+        put("selected_skill_ids", JSONArray(selectedSkillIds))
+        put("selected_mcp_server_ids", JSONArray(selectedMcpServerIds))
+        put("default_skill_ids", JSONArray(settings.defaultSelectedSkillIds))
+        put(
+            "skills",
+            JSONArray().apply {
+                installedSkills.forEach { skill ->
+                    put(
+                        JSONObject().apply {
+                            put("id", skill.id)
+                            put("name", skill.name)
+                            put("description", skill.description)
+                            put("action_label", skill.actionLabel)
+                            put("enabled", skill.isEnabled)
+                            put("selected", skill.id in selectedSkillIds)
+                            put("default_selected", skill.id in settings.defaultSelectedSkillIds)
+                        }
+                    )
+                }
+            },
+        )
+        put("language", settings.language.storageValue)
+        put("theme", settings.themeMode.storageValue)
+        put("extension_count", installedPiExtensions.size)
+        put("skill_count", installedSkills.count { it.isEnabled })
+        put("mcp_server_count", mcpServers.count { it.isEnabled })
+    }
 }
 
 private tailrec fun Context.findActivity(): Activity? = when (this) {
@@ -176,9 +220,69 @@ fun AetherApp(
 ) {
     val uiState = viewModel.uiState.collectAsStateWithLifecycle().value
     val context = LocalContext.current
+    val appRuntime = remember(context) {
+        (context.applicationContext as AetherApplication).runtime
+    }
+    val extensionManager = appRuntime.aetherAppExtensionManager
+    val extensionState = extensionManager.state.collectAsStateWithLifecycle().value
+    val nativeModState = appRuntime.nativeModManager.state.collectAsStateWithLifecycle().value
+    val nativeComponents =
+        appRuntime.modKernel.components.registrations.collectAsStateWithLifecycle().value
+    var selectedExtensionPageId by rememberSaveable { mutableStateOf<String?>(null) }
+    val selectedExtensionPage = extensionState.snapshot.pages.firstOrNull {
+        it.id == selectedExtensionPageId
+    }
+    val extensionContext = remember(uiState) {
+        uiState.toAetherExtensionContext()
+    }
+    val extensionController = remember(
+        extensionState.snapshot,
+        nativeComponents,
+        uiState,
+        extensionContext,
+        viewModel,
+    ) {
+        AetherExtensionUiController(
+            snapshot = extensionState.snapshot,
+            nativeComponents = nativeComponents,
+            uiState = uiState,
+            publicState = extensionContext,
+            onHostCall = viewModel::handleAetherExtensionHostCall,
+            onAction = { extensionId, action, args ->
+                extensionManager.invokeAction(extensionId, action, args)
+            },
+            onOpenPage = { pageId ->
+                selectedExtensionPageId = pageId
+            },
+        )
+    }
 
     LaunchedEffect(uiState.settings.language) {
         AetherLocaleManager.applyIfChanged(context, uiState.settings.language)
+    }
+
+    LaunchedEffect(extensionManager, extensionContext.toString()) {
+        extensionManager.start(extensionContext)
+        extensionManager.updateContext(extensionContext)
+    }
+
+    LaunchedEffect(extensionManager, context) {
+        extensionManager.notifications.collect { notification ->
+            Toast.makeText(context, notification.message, Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    DisposableEffect(extensionManager, viewModel) {
+        extensionManager.setHostHandler(viewModel::handleAetherExtensionHostCall)
+        onDispose {
+            extensionManager.clearHostHandler()
+        }
+    }
+
+    if (selectedExtensionPage != null) {
+        BackHandler {
+            selectedExtensionPageId = null
+        }
     }
 
     LaunchedEffect(uiState.currentScreen) {
@@ -191,17 +295,35 @@ fun AetherApp(
         AetherLocaleManager.localizedContext(context, uiState.settings.language)
     }
 
-    CompositionLocalProvider(LocalContext provides localizedContext) {
+    CompositionLocalProvider(
+        LocalContext provides localizedContext,
+        LocalAetherExtensionUiController provides extensionController,
+    ) {
         AetherTheme(themeMode = uiState.settings.themeMode) {
             Surface(
                 modifier = Modifier.fillMaxSize(),
                 color = MaterialTheme.colorScheme.background,
             ) {
-                AetherAppContent(
-                    viewModel = viewModel,
-                    uiState = uiState,
-                    onPrivacyPolicyAccepted = onPrivacyPolicyAccepted,
-                )
+                Box(modifier = Modifier.fillMaxSize()) {
+                    AetherExtensionComponentHost(
+                        target = AetherExtensionComponentAppContent,
+                        modifier = Modifier.fillMaxSize(),
+                    ) {
+                        AetherAppContent(
+                            viewModel = viewModel,
+                            uiState = uiState,
+                            nativeModState = nativeModState,
+                            onPrivacyPolicyAccepted = onPrivacyPolicyAccepted,
+                        )
+                    }
+                    selectedExtensionPage?.let { page ->
+                        AetherExtensionPageScreen(
+                            page = page,
+                            onBack = { selectedExtensionPageId = null },
+                        )
+                    }
+                    AetherExtensionOverlaySlot(Modifier.fillMaxSize())
+                }
             }
         }
     }
@@ -211,6 +333,7 @@ fun AetherApp(
 private fun AetherAppContent(
     viewModel: AetherViewModel,
     uiState: AetherUiState,
+    nativeModState: AetherNativeModState,
     onPrivacyPolicyAccepted: () -> Unit,
 ) {
     val drawerState = rememberDrawerState(initialValue = androidx.compose.material3.DrawerValue.Closed)
@@ -219,7 +342,11 @@ private fun AetherAppContent(
 
     val lifecycleOwner = LocalLifecycleOwner.current
     val clipboardManager = LocalClipboardManager.current
-    val workspaceFileBridge = remember(context) { WorkspaceFileBridge(context) }
+    val appRuntime = remember(context) {
+        (context.applicationContext as AetherApplication).runtime
+    }
+    val workspaceFileBridge = appRuntime.workspaceFileBridge
+    val runtimeWorkspaceFileBridge = appRuntime.runtimeWorkspaceFileBridge
     val activeSession = uiState.sessions.firstOrNull { it.id == uiState.currentSessionId }
     val activeProviderConfig = uiState.providerConfigs.firstOrNull { it.isEnabled }
         ?: uiState.providerConfigs.firstOrNull()
@@ -260,6 +387,10 @@ private fun AetherAppContent(
     val currentWorkspaceDirectory = workspaceFileBridge.workspaceDirectory(
         sessionId = uiState.currentSessionId,
         mode = uiState.settings.agentWorkspaceMode,
+    )
+    val currentRuntimeWorkspaceDirectory = appRuntime.runtimeRouter.runtimeWorkspaceDirectory(
+        settings = uiState.settings,
+        termuxWorkspaceDirectory = currentWorkspaceDirectory,
     )
 
     LaunchedEffect(viewModel, context) {
@@ -370,8 +501,11 @@ private fun AetherAppContent(
                             destinationUri = destinationUri,
                         )
 
-                        is PendingSaveTarget.WorkspaceFile -> workspaceFileBridge.saveWorkspaceFileToDocument(
-                            path = workspaceFileBridge.resolveLinkPath(saveTarget.rawLink),
+                        is PendingSaveTarget.WorkspaceFile -> runtimeWorkspaceFileBridge.saveWorkspaceFileToDocument(
+                            settings = uiState.settings,
+                            workspaceDirectory = currentRuntimeWorkspaceDirectory,
+                            termuxWorkspaceDirectory = currentWorkspaceDirectory,
+                            path = saveTarget.rawLink,
                             destinationUri = destinationUri,
                         )
                     }
@@ -590,10 +724,14 @@ private fun AetherAppContent(
                         onExploreSettings = viewModel::exploreSettingsFromOnboardingTour,
                     )
 
-                    AppScreen.Chat -> ConversationScreen(
+                    AppScreen.Chat -> AetherExtensionComponentHost(
+                        target = AetherExtensionComponentChatScreen,
+                        modifier = Modifier.fillMaxSize(),
+                    ) {
+                        ConversationScreen(
                     conversationStateKey = uiState.currentSessionId,
                     messages = currentMessages,
-                    workspaceDirectory = currentWorkspaceDirectory,
+                    workspaceDirectory = currentRuntimeWorkspaceDirectory,
                     pendingToolInvocations = pendingToolInvocations,
                     pendingToolInvocationStateKey = "pending-tools-${uiState.currentSessionId}",
                     pendingResponseBlocks = pendingResponseBlocks,
@@ -656,12 +794,11 @@ private fun AetherAppContent(
                         scope.launch {
                             handleAssistantLink(
                                 context = context,
-                                workspaceFileBridge = workspaceFileBridge,
                                 rawLink = rawLink,
-                                onSaveWorkspaceFile = {
-                                    pendingSaveTarget = PendingSaveTarget.WorkspaceFile(rawLink)
+                                onSaveWorkspaceFile = { fileLink ->
+                                    pendingSaveTarget = PendingSaveTarget.WorkspaceFile(fileLink)
                                     saveAttachmentLauncher.launch(
-                                        workspaceFileBridge.resolveWorkspaceDownloadName(rawLink)
+                                        workspaceFileBridge.resolveWorkspaceDownloadName(fileLink)
                                     )
                                 },
                             )
@@ -705,10 +842,15 @@ private fun AetherAppContent(
                     onPauseGeneration = viewModel::pauseGeneration,
                     onDismissTermuxSetupNotice = viewModel::dismissTermuxSetupNotice,
                     onDismissStarterPromptHint = viewModel::dismissStarterPromptHint,
-                    isSending = isCurrentSessionRunning,
-                )
+                            isSending = isCurrentSessionRunning,
+                        )
+                    }
 
-                    AppScreen.Settings -> SettingsScreen(
+                    AppScreen.Settings -> AetherExtensionComponentHost(
+                        target = AetherExtensionComponentSettingsScreen,
+                        modifier = Modifier.fillMaxSize(),
+                    ) {
+                        SettingsScreen(
                     systemPrompt = uiState.settings.systemPrompt,
                     tavilyApiKey = uiState.settings.tavilyApiKey,
                     tavilyBaseUrl = uiState.settings.tavilyBaseUrl,
@@ -745,6 +887,7 @@ private fun AetherAppContent(
                     developerTermuxReadyOverride = uiState.developerTermuxReadyOverride,
                     installedSkills = uiState.installedSkills,
                     installedPiExtensions = uiState.installedPiExtensions,
+                    nativeModState = nativeModState,
                     piExtensionCatalog = uiState.piExtensionCatalog,
                     isLoadingPiExtensions = uiState.isLoadingPiExtensions,
                     piExtensionCatalogError = uiState.piExtensionCatalogError,
@@ -783,9 +926,10 @@ private fun AetherAppContent(
                     onRefreshPiExtensions = viewModel::refreshPiExtensions,
                     onInstallPiExtensionPackage = viewModel::installPiExtensionPackage,
                     onLoadPiPackageDetails = viewModel::loadPiPackageDetails,
-                    onUpdatePiExtensionPackage = viewModel::updatePiExtensionPackage,
-                    onRemovePiExtension = viewModel::removePiExtension,
-                    onImportPiExtension = {
+                     onUpdatePiExtensionPackage = viewModel::updatePiExtensionPackage,
+                     onRemovePiExtension = viewModel::removePiExtension,
+                     onSetPiExtensionEnabled = viewModel::setPiExtensionEnabled,
+                     onImportPiExtension = {
                         piExtensionImportPicker.launch(
                             arrayOf(
                                 "application/zip",
@@ -797,6 +941,10 @@ private fun AetherAppContent(
                             )
                         )
                     },
+                    onAllowNativeModsOnNextStart =
+                        appRuntime.nativeModManager::allowNativeModsOnNextStart,
+                    onDisableNativeModsOnNextStart =
+                        appRuntime.nativeModManager::requestDisableOnNextStart,
                     onSaveHttpMcpServer = viewModel::saveStreamableHttpMcpServer,
                     onSaveStdIoMcpServer = viewModel::saveStdIoMcpServer,
                     onToggleMcpServerEnabled = viewModel::setMcpServerEnabled,
@@ -851,8 +999,9 @@ private fun AetherAppContent(
                     onForceUpdateCheckForTesting = viewModel::forceUpdateCheckForTesting,
                     onSetDeveloperTermuxReadyOverride = viewModel::setDeveloperTermuxReadyOverride,
                     onDownloadAndInstallUpdate = viewModel::downloadAndInstallUpdate,
-                    onBack = viewModel::closeSettings,
-                )
+                            onBack = viewModel::closeSettings,
+                        )
+                    }
         }
             }
         }
@@ -1076,22 +1225,17 @@ private fun saveAttachmentToDocument(
 
 private suspend fun handleAssistantLink(
     context: android.content.Context,
-    workspaceFileBridge: WorkspaceFileBridge,
     rawLink: String,
-    onSaveWorkspaceFile: () -> Unit,
+    onSaveWorkspaceFile: (String) -> Unit,
 ) {
     parseAssistantLocalFileLink(rawLink)?.let { localPath ->
-        openAssistantLocalFile(
-            context = context,
-            workspaceFileBridge = workspaceFileBridge,
-            absolutePath = localPath,
-        )
+        onSaveWorkspaceFile(localPath)
         return
     }
 
     val normalizedLink = normalizeAssistantLink(rawLink)
     if (looksLikeWorkspaceFileLink(normalizedLink)) {
-        onSaveWorkspaceFile()
+        onSaveWorkspaceFile(normalizedLink)
         return
     }
 
@@ -1100,52 +1244,6 @@ private suspend fun handleAssistantLink(
     }
     launchIntentSafely(context, intent) {
         Toast.makeText(context, context.getString(R.string.app_unable_to_open_link), Toast.LENGTH_SHORT).show()
-    }
-}
-
-private suspend fun openAssistantLocalFile(
-    context: android.content.Context,
-    workspaceFileBridge: WorkspaceFileBridge,
-    absolutePath: String,
-) {
-    val resolvedFile = runCatching {
-        withContext(Dispatchers.IO) {
-            val directFile = File(absolutePath)
-            if (directFile.exists() && directFile.isFile && directFile.canRead()) {
-                return@withContext directFile
-            }
-
-            val payload = workspaceFileBridge.readWorkspaceFile(
-                path = absolutePath,
-                byteLimit = AssistantLocalFileOpenByteLimit,
-            ).getOrThrow()
-            val exportDirectory = File(context.cacheDir, AssistantLocalFileCacheDirectory).apply {
-                mkdirs()
-            }
-            val fileName = payload.absolutePath.substringAfterLast('/').ifBlank { "file" }
-            File(exportDirectory, fileName).apply {
-                outputStream().use { output ->
-                    output.write(payload.bytes)
-                    output.flush()
-                }
-            }
-        }
-    }.getOrElse {
-        Toast.makeText(context, context.getString(R.string.app_unable_to_open_file), Toast.LENGTH_SHORT).show()
-        return
-    }
-    val contentUri = FileProvider.getUriForFile(
-        context,
-        "${context.packageName}.fileprovider",
-        resolvedFile,
-    )
-    val intent = Intent(Intent.ACTION_VIEW).apply {
-        setDataAndType(contentUri, "*/*")
-        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-    }
-    launchIntentSafely(context, intent) {
-        Toast.makeText(context, context.getString(R.string.app_unable_to_open_file), Toast.LENGTH_SHORT).show()
     }
 }
 

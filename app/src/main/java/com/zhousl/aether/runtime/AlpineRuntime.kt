@@ -57,6 +57,38 @@ class AlpineRuntime(
     override val workspaceRoot: String = "/workspace"
     override val managedCommandsDirectory: String = "/root/.aether/bash-runs"
 
+    internal fun resolveWorkspaceHostPath(
+        path: String,
+        workingDirectory: String = workspaceRoot,
+    ): AlpineWorkspaceHostPath? {
+        val normalizedWorkingDirectory = normalizePath(workingDirectory.trim())
+            .ifBlank { workspaceRoot }
+        val normalizedGuestPath = when {
+            path.isBlank() -> normalizedWorkingDirectory
+            path.startsWith("/") -> java.nio.file.Paths.get(path).normalize().toString()
+            else -> java.nio.file.Paths.get(normalizedWorkingDirectory).resolve(path).normalize().toString()
+        }
+        if (
+            normalizedGuestPath != workspaceRoot &&
+            !normalizedGuestPath.startsWith("$workspaceRoot/")
+        ) {
+            return null
+        }
+        val relativePath = normalizedGuestPath.removePrefix(workspaceRoot).trimStart('/')
+        val canonicalWorkspace = workspaceDir.canonicalFile
+        val hostFile = File(canonicalWorkspace, relativePath).canonicalFile
+        if (
+            hostFile != canonicalWorkspace &&
+            !hostFile.path.startsWith("${canonicalWorkspace.path}${File.separator}")
+        ) {
+            return null
+        }
+        return AlpineWorkspaceHostPath(
+            guestPath = normalizedGuestPath,
+            hostFile = hostFile,
+        )
+    }
+
     fun setEnvironmentVariables(variables: List<AlpineEnvironmentVariable>) {
         environmentVariables = normalizeAlpineEnvironmentVariables(variables)
     }
@@ -148,6 +180,9 @@ class AlpineRuntime(
         requireReady()
         guestPathToHostFile(normalizePath(guestPath))
     }
+
+    internal fun resolveManagedGuestPath(guestPath: String): File =
+        guestPathToHostFile(normalizePath(guestPath))
 
     suspend fun startManagedProcess(
         command: String,
@@ -948,4 +983,9 @@ data class AlpineTerminalLaunchSpec(
     val arguments: Array<String>,
     val environment: Array<String>,
     val workingDirectory: String,
+)
+
+internal data class AlpineWorkspaceHostPath(
+    val guestPath: String,
+    val hostFile: File,
 )

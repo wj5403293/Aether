@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createInterface } from "node:readline";
 import { stdin as input, stdout as output, stderr } from "node:process";
 import {
@@ -64,6 +65,13 @@ import {
   updateAetherExtensionPackage,
   type AetherExtensionRuntime,
 } from "./extensions.js";
+import {
+  aetherAppExtensionSnapshot,
+  configureAetherExtensionTransport,
+  dispatchAetherAppExtensionEvent,
+  invokeAetherAppExtensionAction,
+  loadAetherAppExtensions,
+} from "./aether-extensions.js";
 
 const BRIDGE_VERSION = "2.0.0-alpha.0";
 const PI_AI_VERSION = "0.80.6";
@@ -120,6 +128,12 @@ interface PendingHostToolRequest {
   timeout: NodeJS.Timeout;
 }
 
+interface PendingAetherHostCall {
+  resolve: (result: JsonObject) => void;
+  reject: (error: Error) => void;
+  timeout: NodeJS.Timeout;
+}
+
 type InMemorySession = Awaited<ReturnType<InMemorySessionRepo["create"]>>;
 
 interface HarnessSessionState {
@@ -148,6 +162,9 @@ interface HarnessSessionState {
 
 const activeAborters = new Map<string, () => void | Promise<unknown>>();
 const pendingHostToolRequests = new Map<string, PendingHostToolRequest>();
+const pendingAetherHostCalls = new Map<string, PendingAetherHostCall>();
+const aetherSubscriberRequestIds = new Set<string>();
+const aetherOperationContext = new AsyncLocalStorage<string>();
 const pendingAuthPrompts = new Map<
   string,
   {
@@ -157,6 +174,10 @@ const pendingAuthPrompts = new Map<
   }
 >();
 const harnessSessions = new Map<string, HarnessSessionState>();
+let currentExtensionLoadOptions = {
+  disabledExtensionPaths: [] as string[],
+  disabledPackageSources: [] as string[],
+};
 
 interface SharedCredentialState {
   credential?: Credential;
@@ -186,6 +207,7 @@ const builtinProviderById = new Map(
 let defaultModelConfig: ModelConfig | undefined;
 let hostToolCounter = 0;
 let authPromptCounter = 0;
+let aetherHostCallCounter = 0;
 
 function positiveIntegerEnvironmentValue(name: string, fallback: number): number {
   const parsed = Number.parseInt(process.env[name] ?? "", 10);
@@ -384,6 +406,57 @@ function writeError(id: string | undefined, error: unknown, code = "bridge_error
     },
   });
 }
+
+function emitAetherSubscriberEvent(event: string, payload: JsonObject = {}): void {
+  for (const requestId of aetherSubscriberRequestIds) {
+    writeEvent(requestId, event, payload);
+  }
+}
+
+function requestAetherHost(method: string, args: JsonObject): Promise<JsonObject> {
+  const requestId = aetherOperationContext.getStore()
+    ?? aetherSubscriberRequestIds.values().next().value;
+  if (!requestId) {
+    throw new Error("The Aether Android host is not subscribed.");
+  }
+  const callId = `aether-host-${Date.now()}-${++aetherHostCallCounter}`;
+  writeEvent(requestId, "aether_host_call", {
+    call_id: callId,
+    method,
+    args,
+  });
+  return new Promise<JsonObject>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      pendingAetherHostCalls.delete(callId);
+      reject(new Error(`Aether host call timed out: ${method}`));
+    }, 2 * 60 * 1000);
+    pendingAetherHostCalls.set(callId, { resolve, reject, timeout });
+  });
+}
+
+function resolveAetherHostCall(payload: JsonObject): boolean {
+  const callId = asString(payload.call_id).trim();
+  const pending = callId ? pendingAetherHostCalls.get(callId) : undefined;
+  if (!pending) return false;
+  pendingAetherHostCalls.delete(callId);
+  clearTimeout(pending.timeout);
+  if (asBoolean(payload.ok, true)) {
+    pending.resolve(asObject(payload.result));
+  } else {
+    pending.reject(new Error(asString(payload.error, "Aether host call failed.")));
+  }
+  return true;
+}
+
+configureAetherExtensionTransport({
+  requestHost: requestAetherHost,
+  invalidate(version) {
+    emitAetherSubscriberEvent("aether_invalidated", { version });
+  },
+  notify(message, level) {
+    emitAetherSubscriberEvent("aether_notification", { message, level });
+  },
+});
 
 function errorMessageWithCause(error: unknown): string {
   if (!(error instanceof Error)) return String(error);
@@ -1589,13 +1662,21 @@ async function activateExtensionRuntime(
 async function reloadExtensionsForState(
   state: HarnessSessionState,
   configuredPaths: string[] = [],
+  loadOptions: {
+    disabledExtensionPaths?: string[];
+    disabledPackageSources?: string[];
+  } = {},
 ): Promise<{
   reloaded: boolean;
   scheduled: boolean;
   paths: string[];
   errors: Array<{ path: string; error: string }>;
 }> {
-  const candidate = await loadAetherExtensions(state.workspaceDirectory, configuredPaths);
+  const candidate = await loadAetherExtensions(
+    state.workspaceDirectory,
+    configuredPaths,
+    loadOptions,
+  );
   if (candidate.errors.length > 0) {
     candidate.runner.invalidate("Extension reload candidate was rejected.");
     return {
@@ -1622,6 +1703,25 @@ async function reloadExtensionsForState(
     paths: candidate.paths,
     errors: [],
   };
+}
+
+function extensionLoadOptionsFromPayload(payload: JsonObject): {
+  disabledExtensionPaths: string[];
+  disabledPackageSources: string[];
+} {
+  const stringsFrom = (value: unknown): string[] =>
+    Array.isArray(value)
+      ? value.filter((entry): entry is string => typeof entry === "string")
+      : [];
+  const hasOptions =
+    Object.prototype.hasOwnProperty.call(payload, "disabled_extension_paths") ||
+    Object.prototype.hasOwnProperty.call(payload, "disabled_package_sources");
+  if (!hasOptions) return currentExtensionLoadOptions;
+  currentExtensionLoadOptions = {
+    disabledExtensionPaths: stringsFrom(payload.disabled_extension_paths),
+    disabledPackageSources: stringsFrom(payload.disabled_package_sources),
+  };
+  return currentExtensionLoadOptions;
 }
 
 async function applyPendingExtensionChanges(state: HarnessSessionState): Promise<void> {
@@ -1858,6 +1958,7 @@ async function createHarnessSession(
     Array.isArray(payload.extension_paths)
       ? payload.extension_paths.filter((value): value is string => typeof value === "string")
       : [],
+    extensionLoadOptionsFromPayload(payload),
   );
   const configuredExtensionPaths = Array.isArray(payload.extension_paths)
     ? payload.extension_paths.filter((value): value is string => typeof value === "string")
@@ -2272,7 +2373,11 @@ async function reloadExtensions(payload: JsonObject): Promise<JsonObject> {
   const configuredPaths = Array.isArray(payload.extension_paths)
     ? payload.extension_paths.filter((value): value is string => typeof value === "string")
     : [];
-  const result = await reloadExtensionsForState(state, configuredPaths);
+  const result = await reloadExtensionsForState(
+    state,
+    configuredPaths,
+    extensionLoadOptionsFromPayload(payload),
+  );
   return {
     ...extensionRuntimePayload(state),
     ...result,
@@ -2306,6 +2411,7 @@ async function installedExtensionPackagesPayload(): Promise<JsonObject> {
       version: installedPackage.version,
       description: installedPackage.description,
       extension_count: installedPackage.extensionCount,
+      aether_extension_count: installedPackage.aetherExtensionCount,
       skill_count: installedPackage.skillCount,
       prompt_count: installedPackage.promptCount,
       theme_count: installedPackage.themeCount,
@@ -2314,21 +2420,27 @@ async function installedExtensionPackagesPayload(): Promise<JsonObject> {
   };
 }
 
-async function reloadAllExtensionSessions(): Promise<JsonObject> {
+async function reloadAllExtensionSessions(
+  payload: JsonObject = {},
+): Promise<JsonObject> {
+  const loadOptions = extensionLoadOptionsFromPayload(payload);
   const results: JsonObject[] = [];
   for (const state of harnessSessions.values()) {
     const result = await reloadExtensionsForState(
       state,
       state.configuredExtensionPaths,
+      loadOptions,
     );
     results.push({
       session_id: state.sessionId,
       ...result,
     });
   }
+  await loadAetherAppExtensions(process.cwd(), loadOptions);
   return {
     session_count: results.length,
     sessions: results,
+    aether: await aetherAppExtensionSnapshot(),
   };
 }
 
@@ -2339,7 +2451,7 @@ async function installExtensionPackage(payload: JsonObject): Promise<JsonObject>
     installed: true,
     source,
     ...(await installedExtensionPackagesPayload()),
-    reload: await reloadAllExtensionSessions(),
+    reload: await reloadAllExtensionSessions(payload),
   };
 }
 
@@ -2350,7 +2462,9 @@ async function removeExtensionPackage(payload: JsonObject): Promise<JsonObject> 
     removed,
     source,
     ...(await installedExtensionPackagesPayload()),
-    reload: removed ? await reloadAllExtensionSessions() : { session_count: 0, sessions: [] },
+    reload: removed
+      ? await reloadAllExtensionSessions(payload)
+      : { session_count: 0, sessions: [] },
   };
 }
 
@@ -2361,8 +2475,62 @@ async function updateExtensionPackage(payload: JsonObject): Promise<JsonObject> 
     updated: true,
     source,
     ...(await installedExtensionPackagesPayload()),
-    reload: await reloadAllExtensionSessions(),
+    reload: await reloadAllExtensionSessions(payload),
   };
+}
+
+async function reloadAetherAppExtensionsRequest(
+  id: string,
+  payload: JsonObject,
+): Promise<JsonObject> {
+  return aetherOperationContext.run(id, async () => {
+    await loadAetherAppExtensions(
+      process.cwd(),
+      extensionLoadOptionsFromPayload(payload),
+    );
+    return {
+      reloaded: true,
+      snapshot: await aetherAppExtensionSnapshot(asObject(payload.context)),
+    };
+  });
+}
+
+async function getAetherAppExtensionsRequest(
+  id: string,
+  payload: JsonObject,
+): Promise<JsonObject> {
+  return aetherOperationContext.run(id, async () => ({
+    snapshot: await aetherAppExtensionSnapshot(asObject(payload.context)),
+  }));
+}
+
+async function invokeAetherAppExtensionActionRequest(
+  id: string,
+  payload: JsonObject,
+): Promise<JsonObject> {
+  return aetherOperationContext.run(id, async () => ({
+    ...(await invokeAetherAppExtensionAction(
+      asString(payload.extension_id),
+      asString(payload.action),
+      asObject(payload.args),
+      asObject(payload.context),
+    )),
+    snapshot: await aetherAppExtensionSnapshot(asObject(payload.context)),
+  }));
+}
+
+async function dispatchAetherAppExtensionEventRequest(
+  id: string,
+  payload: JsonObject,
+): Promise<JsonObject> {
+  return aetherOperationContext.run(id, async () => ({
+    ...(await dispatchAetherAppExtensionEvent(
+      asString(payload.event),
+      asObject(payload.data),
+      asObject(payload.context),
+    )),
+    snapshot: await aetherAppExtensionSnapshot(asObject(payload.context)),
+  }));
 }
 
 async function abortBridgeTarget(payload: JsonObject): Promise<JsonObject> {
@@ -2458,6 +2626,29 @@ async function handleRequest(request: BridgeRequest): Promise<void> {
       return;
     case "reload_all_extensions":
       writeResponse(id, await reloadAllExtensionSessions());
+      return;
+    case "reload_aether_extensions":
+      writeResponse(id, await reloadAetherAppExtensionsRequest(id, payload));
+      return;
+    case "get_aether_extensions":
+      writeResponse(id, await getAetherAppExtensionsRequest(id, payload));
+      return;
+    case "invoke_aether_extension_action":
+      writeResponse(id, await invokeAetherAppExtensionActionRequest(id, payload));
+      return;
+    case "dispatch_aether_extension_event":
+      writeResponse(id, await dispatchAetherAppExtensionEventRequest(id, payload));
+      return;
+    case "subscribe_aether_extensions":
+      aetherSubscriberRequestIds.add(id);
+      writeEvent(id, "aether_invalidated", { subscribed: true });
+      return;
+    case "unsubscribe_aether_extensions":
+      aetherSubscriberRequestIds.delete(asString(payload.request_id, id));
+      writeResponse(id, { unsubscribed: true });
+      return;
+    case "aether_host_result":
+      writeResponse(id, { accepted: resolveAetherHostCall(payload) });
       return;
     case "steer":
       writeResponse(id, await steerHarnessSession(payload));

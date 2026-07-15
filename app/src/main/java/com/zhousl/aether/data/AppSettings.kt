@@ -148,6 +148,7 @@ data class AppSettings(
     val defaultTitleModelKey: String = "",
     val defaultNamingModelKey: String = "",
     val defaultCompactingModelKey: String = "",
+    val defaultSelectedSkillIds: List<String> = emptyList(),
     val onboardingSeenVersion: Int = 0,
     val onboardingCompletedVersion: Int = 0,
     val privacyPolicyAccepted: Boolean = false,

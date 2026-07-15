@@ -12,6 +12,7 @@ import com.zhousl.aether.data.LlmMessage
 import com.zhousl.aether.data.LlmProviderConfig
 import com.zhousl.aether.data.McpClientManager
 import com.zhousl.aether.data.McpToolBinding
+import com.zhousl.aether.data.PiExtensionStateRepository
 import com.zhousl.aether.data.StreamingStatus
 import com.zhousl.aether.data.SettingsRepository
 import java.util.concurrent.ConcurrentHashMap
@@ -34,12 +35,14 @@ class PiAgentRunner(
     private val bridge: PiKernelBridge,
     private val toolExecutor: AetherToolExecutor? = null,
     private val settingsRepository: SettingsRepository? = null,
+    private val piExtensionStateRepository: PiExtensionStateRepository? = null,
     private val diagnosticLogger: AetherDiagnosticLogger = AetherDiagnosticLogger.NoOp,
 ) {
     suspend fun runTurn(
         settings: AppSettings,
         messages: List<LlmMessage>,
         workspaceDirectory: String,
+        termuxWorkspaceDirectory: String,
         availableSkills: List<InstalledSkill> = emptyList(),
         activeSkills: List<ActiveSkillContext> = emptyList(),
         mcpToolBindings: List<McpToolBinding> = emptyList(),
@@ -80,12 +83,21 @@ class PiAgentRunner(
                     )
                 }
                 val payload = JSONObject().apply {
+                    val extensionLoadOptions = piExtensionStateRepository?.loadOptions()
                     put("model_config", settings.toPiModelConfig().toJson())
                     put("session_id", resolvedSessionId)
                     put("system_prompt", prompt())
                     put("messages", messages.toPiJson())
                     put("workspace_directory", workspaceDirectory)
                     put("reasoning", settings.toPiThinkingLevel())
+                    put(
+                        "disabled_extension_paths",
+                        JSONArray(extensionLoadOptions?.disabledExtensionPaths?.toList().orEmpty()),
+                    )
+                    put(
+                        "disabled_package_sources",
+                        JSONArray(extensionLoadOptions?.disabledPackageSources?.toList().orEmpty()),
+                    )
                     put(
                         "host_tools",
                         AetherToolExecutor.hostToolDefinitions(
@@ -108,6 +120,7 @@ class PiAgentRunner(
                                 sessionId = resolvedSessionId,
                                 settings = settings,
                                 workspaceDirectory = workspaceDirectory,
+                                termuxWorkspaceDirectory = termuxWorkspaceDirectory,
                                 availableSkills = resolvedAvailableSkills,
                                 activeSkills = resolvedActiveSkills,
                                 providerConfigs = providerConfigs,
@@ -140,6 +153,7 @@ class PiAgentRunner(
                                     sessionId = resolvedSessionId,
                                     settings = settings,
                                     workspaceDirectory = workspaceDirectory,
+                                    termuxWorkspaceDirectory = termuxWorkspaceDirectory,
                                     availableSkills = resolvedAvailableSkills,
                                     activeSkills = resolvedActiveSkills,
                                     providerConfigs = providerConfigs,
@@ -273,6 +287,7 @@ class PiAgentRunner(
         sessionId: String,
         settings: AppSettings,
         workspaceDirectory: String,
+        termuxWorkspaceDirectory: String,
         availableSkills: List<InstalledSkill>,
         activeSkills: MutableList<ActiveSkillContext>,
         providerConfigs: List<LlmProviderConfig>,
@@ -315,6 +330,7 @@ class PiAgentRunner(
             executor.execute(
                 settings = settings,
                 workspaceDirectory = workspaceDirectory,
+                termuxWorkspaceDirectory = termuxWorkspaceDirectory,
                 toolName = toolName,
                 argumentsJson = argumentsJson,
                 availableSkills = availableSkills,

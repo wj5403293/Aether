@@ -157,6 +157,7 @@ class McpClientManager(
     suspend fun syncServers(
         servers: List<McpServerConfig>,
         workspaceDirectory: String,
+        termuxWorkspaceDirectory: String = workspaceDirectory,
     ) = withContext(Dispatchers.IO) {
         val enabledIds = servers
             .filter { it.isEnabled }
@@ -168,13 +169,24 @@ class McpClientManager(
         servers
             .filter { it.isEnabled }
             .forEach { server ->
+                val serverWorkspaceDirectory = resolveMcpWorkspaceDirectory(
+                    server = server,
+                    settings = settings,
+                    runtimeRouter = runtimeRouter,
+                    workspaceDirectory = workspaceDirectory,
+                    termuxWorkspaceDirectory = termuxWorkspaceDirectory,
+                )
                 val existing = sessions[server.id]
-                if (existing == null || existing.config != server || existing.workspaceDirectory != workspaceDirectory) {
+                if (
+                    existing == null ||
+                    existing.config != server ||
+                    existing.workspaceDirectory != serverWorkspaceDirectory
+                ) {
                     disconnect(server.id)
                     val session = McpServerSession(
                         config = server,
-                        transport = createTransport(server, workspaceDirectory),
-                        workspaceDirectory = workspaceDirectory,
+                        transport = createTransport(server, serverWorkspaceDirectory),
+                        workspaceDirectory = serverWorkspaceDirectory,
                         callbacks = callbacks,
                         diagnosticLogger = diagnosticLogger,
                     )
@@ -200,18 +212,26 @@ class McpClientManager(
     suspend fun testServer(
         server: McpServerConfig,
         workspaceDirectory: String,
+        termuxWorkspaceDirectory: String = workspaceDirectory,
         operation: McpServerTestOperation,
         settings: AppSettings = this.settings,
     ): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
+            val serverWorkspaceDirectory = resolveMcpWorkspaceDirectory(
+                server = server,
+                settings = settings,
+                runtimeRouter = runtimeRouter,
+                workspaceDirectory = workspaceDirectory,
+                termuxWorkspaceDirectory = termuxWorkspaceDirectory,
+            )
             val testSession = McpServerSession(
                 config = server.copy(isEnabled = true),
                 transport = createTransport(
                     server = server.copy(isEnabled = true),
-                    workspaceDirectory = workspaceDirectory,
+                    workspaceDirectory = serverWorkspaceDirectory,
                     settings = settings,
                 ),
-                workspaceDirectory = workspaceDirectory,
+                workspaceDirectory = serverWorkspaceDirectory,
                 callbacks = callbacks,
                 diagnosticLogger = diagnosticLogger,
             )
@@ -532,6 +552,22 @@ class McpClientManager(
             requestTimeoutMillis = server.requestTimeoutMillis,
         )
     }
+}
+
+internal fun resolveMcpWorkspaceDirectory(
+    server: McpServerConfig,
+    settings: AppSettings,
+    runtimeRouter: RuntimeRouter,
+    workspaceDirectory: String,
+    termuxWorkspaceDirectory: String,
+): String = when (val transport = server.transport) {
+    is McpTransportConfig.StdIo -> runtimeRouter.runtimeWorkspaceDirectory(
+        settings = settings,
+        termuxWorkspaceDirectory = termuxWorkspaceDirectory,
+        environment = transport.runtimeEnvironment?.storageValue,
+    )
+
+    is McpTransportConfig.StreamableHttp -> workspaceDirectory
 }
 
 private class McpServerSession(

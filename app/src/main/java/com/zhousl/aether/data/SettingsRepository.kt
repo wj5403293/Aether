@@ -95,6 +95,9 @@ class SettingsRepository(
             defaultTitleModelKey = preferences[DEFAULT_TITLE_MODEL_KEY].orEmpty(),
             defaultNamingModelKey = preferences[DEFAULT_NAMING_MODEL_KEY].orEmpty(),
             defaultCompactingModelKey = preferences[DEFAULT_COMPACTING_MODEL_KEY].orEmpty(),
+            defaultSelectedSkillIds = parseStringArray(
+                preferences[DEFAULT_SELECTED_SKILL_IDS].orEmpty()
+            ),
             onboardingSeenVersion = preferences[ONBOARDING_SEEN_VERSION] ?: 0,
             onboardingCompletedVersion = preferences[ONBOARDING_COMPLETED_VERSION] ?: 0,
             privacyPolicyAccepted = preferences[PRIVACY_POLICY_ACCEPTED] ?: false,
@@ -354,6 +357,7 @@ class SettingsRepository(
             it[DEFAULT_TITLE_MODEL_KEY] = settings.defaultTitleModelKey
             it[DEFAULT_NAMING_MODEL_KEY] = settings.defaultNamingModelKey
             it[DEFAULT_COMPACTING_MODEL_KEY] = settings.defaultCompactingModelKey
+            it[DEFAULT_SELECTED_SKILL_IDS] = serializeStringArray(settings.defaultSelectedSkillIds)
             it.remove(PROVIDER)
             it.remove(BASIC_FUNCTION_CALLING_COMPATIBILITY_MODE)
             it.remove(UNSUPPORTED_PARALLEL_TOOL_CALL_PROVIDER_KEYS)
@@ -445,6 +449,7 @@ class SettingsRepository(
             it[DEFAULT_TITLE_MODEL_KEY] = settings.defaultTitleModelKey
             it[DEFAULT_NAMING_MODEL_KEY] = settings.defaultNamingModelKey
             it[DEFAULT_COMPACTING_MODEL_KEY] = settings.defaultCompactingModelKey
+            it[DEFAULT_SELECTED_SKILL_IDS] = serializeStringArray(settings.defaultSelectedSkillIds)
             it.remove(PROVIDER)
             it.remove(BASIC_FUNCTION_CALLING_COMPATIBILITY_MODE)
             it.remove(UNSUPPORTED_PARALLEL_TOOL_CALL_PROVIDER_KEYS)
@@ -474,6 +479,12 @@ class SettingsRepository(
     suspend fun updateLastUpdateCheckAtMillis(value: Long) {
         context.dataStore.edit { prefs ->
             prefs[LAST_UPDATE_CHECK_AT_MILLIS] = value
+        }
+    }
+
+    suspend fun updateDefaultSelectedSkillIds(skillIds: List<String>) {
+        context.dataStore.edit { preferences ->
+            preferences[DEFAULT_SELECTED_SKILL_IDS] = serializeStringArray(skillIds)
         }
     }
 
@@ -537,6 +548,7 @@ class SettingsRepository(
         val DEFAULT_TITLE_MODEL_KEY = stringPreferencesKey("default_title_model_key")
         val DEFAULT_NAMING_MODEL_KEY = stringPreferencesKey("default_naming_model_key")
         val DEFAULT_COMPACTING_MODEL_KEY = stringPreferencesKey("default_compacting_model_key")
+        val DEFAULT_SELECTED_SKILL_IDS = stringPreferencesKey("default_selected_skill_ids")
         val UNSUPPORTED_PARALLEL_TOOL_CALL_PROVIDER_KEYS =
             stringPreferencesKey("unsupported_parallel_tool_call_provider_keys")
         val BASIC_FUNCTION_CALLING_COMPATIBILITY_MODE =
@@ -548,6 +560,23 @@ class SettingsRepository(
         val LAST_UPDATE_CHECK_AT_MILLIS = longPreferencesKey("last_update_check_at_millis")
     }
 }
+
+private fun parseStringArray(rawValue: String): List<String> {
+    if (rawValue.isBlank()) return emptyList()
+    return runCatching {
+        val array = JSONArray(rawValue)
+        buildList {
+            for (index in 0 until array.length()) {
+                array.optString(index).trim().takeIf(String::isNotBlank)?.let(::add)
+            }
+        }.distinct()
+    }.getOrDefault(emptyList())
+}
+
+private fun serializeStringArray(values: List<String>): String =
+    JSONArray().apply {
+        values.map(String::trim).filter(String::isNotBlank).distinct().forEach(::put)
+    }.toString()
 
 private fun LlmProviderConfig.matchesStoredModel(
     piProviderId: String,

@@ -63,15 +63,18 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.view.ViewCompat
+import com.zhousl.aether.AetherApplication
 import com.zhousl.aether.R
+import com.zhousl.aether.data.LocalRuntimeId
+import com.zhousl.aether.data.RuntimeWorkspaceFileBridge
 import com.zhousl.aether.data.WorkspaceFileBridge
+import com.zhousl.aether.data.resolveWorkspaceRuntimeId
 import com.zhousl.aether.termux.TermuxContract
 import com.zhousl.aether.ui.theme.AetherOnSurface
 import com.zhousl.aether.ui.theme.AetherOnSurfaceVariant
@@ -516,7 +519,13 @@ private fun MarkdownImageBlock(
     onLinkClick: (String) -> Unit,
 ) {
     val context = LocalContext.current
-    val workspaceFileBridge = remember(context) { WorkspaceFileBridge(context) }
+    val appRuntime = remember(context) {
+        (context.applicationContext as? AetherApplication)?.runtime
+    }
+    val workspaceFileBridge = remember(context, appRuntime) {
+        appRuntime?.workspaceFileBridge ?: WorkspaceFileBridge(context)
+    }
+    val runtimeWorkspaceFileBridge = appRuntime?.runtimeWorkspaceFileBridge
     val resolvedUrl = remember(image.url) { normalizeMarkdownImageUrl(image.url).orEmpty() }
     val originalLinkTarget = remember(resolvedUrl, workspaceDirectory) {
         buildMarkdownImageOriginalLinkTarget(
@@ -535,6 +544,7 @@ private fun MarkdownImageBlock(
             loadMarkdownImage(
                 context = context,
                 workspaceFileBridge = workspaceFileBridge,
+                runtimeWorkspaceFileBridge = runtimeWorkspaceFileBridge,
                 rawUrl = resolvedUrl,
                 workspaceDirectory = workspaceDirectory,
                 allowRootImageRead = allowRootImageRead,
@@ -2008,7 +2018,6 @@ private fun AnnotatedString.Builder.appendInline(
             pushStyle(
                 SpanStyle(
                     color = AetherPrimary,
-                    textDecoration = TextDecoration.Underline,
                 )
             )
             pushStringAnnotation(
@@ -2031,7 +2040,6 @@ private fun AnnotatedString.Builder.appendInline(
             pushStyle(
                 SpanStyle(
                     color = AetherPrimary,
-                    textDecoration = TextDecoration.Underline,
                 )
             )
             pushStringAnnotation(
@@ -2097,6 +2105,7 @@ private fun parseAutoLink(
 private suspend fun loadMarkdownImage(
     context: Context,
     workspaceFileBridge: WorkspaceFileBridge,
+    runtimeWorkspaceFileBridge: RuntimeWorkspaceFileBridge?,
     rawUrl: String,
     workspaceDirectory: String?,
     allowRootImageRead: Boolean,
@@ -2125,6 +2134,7 @@ private suspend fun loadMarkdownImage(
             loadWorkspaceImageBinary(
                 context = context,
                 workspaceFileBridge = workspaceFileBridge,
+                runtimeWorkspaceFileBridge = runtimeWorkspaceFileBridge,
                 rawPath = localFilePath ?: normalizedUrl,
                 workingDirectory = workspaceDirectory
                     ?.trim()
@@ -2151,6 +2161,7 @@ private suspend fun loadMarkdownImage(
 private suspend fun loadWorkspaceImageBinary(
     context: Context,
     workspaceFileBridge: WorkspaceFileBridge,
+    runtimeWorkspaceFileBridge: RuntimeWorkspaceFileBridge?,
     rawPath: String,
     workingDirectory: String,
     allowRootImageRead: Boolean,
@@ -2175,12 +2186,28 @@ private suspend fun loadWorkspaceImageBinary(
             error(localReadFailure?.message ?: readDataError)
         }
     }
-    val workspaceResult = workspaceFileBridge.readWorkspaceFile(
+    val defaultRuntimeId = resolveWorkspaceRuntimeId(
+        path = "",
+        workingDirectory = workingDirectory,
+        defaultRuntimeId = LocalRuntimeId.Termux,
+    )
+    val resolvedRuntimeId = resolveWorkspaceRuntimeId(
         path = resolvedPath,
+        workingDirectory = workingDirectory,
+        defaultRuntimeId = defaultRuntimeId,
+    )
+    val workspaceResult = runtimeWorkspaceFileBridge?.readWorkspaceFile(
+        path = resolvedPath,
+        workingDirectory = workingDirectory,
+        defaultRuntimeId = defaultRuntimeId,
+        byteLimit = MaxMarkdownImageBytes,
+    ) ?: workspaceFileBridge.readWorkspaceFile(
+        path = resolvedPath,
+        workingDirectory = workingDirectory,
         byteLimit = MaxMarkdownImageBytes,
     )
     val payload = workspaceResult.getOrElse { workspaceThrowable ->
-        if (!allowRootImageRead) {
+        if (!allowRootImageRead || resolvedRuntimeId == LocalRuntimeId.Alpine) {
             error(
                 localReadFailure?.message
                     ?: workspaceThrowable.message

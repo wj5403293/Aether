@@ -64,6 +64,7 @@ Aether 的 UI 和交互大量参考了 ChatGPT、Codex CLI/App、Gemini、Poco A
 - **Pi Harness 内核**: 采用 Pi 框架，拥有最广泛的 Model Provider 兼容性，以及最轻量、最高效的 Agent 执行引擎。
 - **内置 Alpine 虚拟机**: 自动安装 Alpine Linux 运行环境，开箱即用，支持各种 Linux 工具与命令行操作。
 - **扩展主机控制**: 支持可选的 Shizuku 与 Termux 扩展，用于直接操纵和控制手机系统。
+- **可信代码 Extensions**: 同一个 package 可以同时扩展 Pi Agent，并向 Aether 注入原生 Compose/WebView UI 与应用逻辑。参见 [Aether App Extensions](docs/AETHER_EXTENSIONS.md)。
 
 ---
 

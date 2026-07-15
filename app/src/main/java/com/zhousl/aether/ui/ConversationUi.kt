@@ -557,6 +557,17 @@ fun ConversationScreen(
                     inputFocused = composerFocused,
                     onStarterPromptSelected = onInputChanged,
                 )
+                AetherExtensionSlot(
+                    slot = AetherExtensionSlotChatEmpty,
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .fillMaxWidth()
+                        .padding(
+                            start = 20.dp,
+                            end = 20.dp,
+                            top = topBarBodyHeight + 12.dp,
+                        ),
+                )
             } else {
                 LazyColumn(
                     state = listState,
@@ -571,6 +582,9 @@ fun ConversationScreen(
                     ),
                     verticalArrangement = Arrangement.spacedBy(22.dp),
                 ) {
+                    item(key = "aether-extension-chat-list-start") {
+                        AetherExtensionSlot(AetherExtensionSlotChatListStart)
+                    }
                     items(conversationItems, key = { it.key }) { item ->
                         when (item) {
                             is ConversationListItem.Message -> {
@@ -691,6 +705,9 @@ fun ConversationScreen(
                     items(pendingInputs, key = { it.id }) { pendingInput ->
                         PendingSessionInputBubble(pendingInput = pendingInput)
                     }
+                    item(key = "aether-extension-chat-list-end") {
+                        AetherExtensionSlot(AetherExtensionSlotChatListEnd)
+                    }
                     item(key = "conversation-bottom-anchor") {
                         Spacer(
                             modifier = Modifier
@@ -803,19 +820,25 @@ private fun ConversationTopOverlay(
                 .background(topOverlayBodyGradient())
                 .onSizeChanged { onBodyHeightChanged(it.height) },
         ) {
-            ConversationTopBar(
-                modelOptions = modelOptions,
-                modelCatalogInfo = modelCatalogInfo,
-                selectedModelKey = selectedModelKey,
-                reasoningEffort = reasoningEffort,
-                thinkingLevelsByProviderModel = thinkingLevelsByProviderModel,
-                thinkingLevelClampsByProviderModel = thinkingLevelClampsByProviderModel,
-                onMenu = onMenu,
-                onModelSelected = onModelSelected,
-                onModelSelectorOpened = onModelSelectorOpened,
-                onReasoningEffortSelected = onReasoningEffortSelected,
-                onNewChat = onNewChat,
-            )
+            Column {
+                ConversationTopBar(
+                    modelOptions = modelOptions,
+                    modelCatalogInfo = modelCatalogInfo,
+                    selectedModelKey = selectedModelKey,
+                    reasoningEffort = reasoningEffort,
+                    thinkingLevelsByProviderModel = thinkingLevelsByProviderModel,
+                    thinkingLevelClampsByProviderModel = thinkingLevelClampsByProviderModel,
+                    onMenu = onMenu,
+                    onModelSelected = onModelSelected,
+                    onModelSelectorOpened = onModelSelectorOpened,
+                    onReasoningEffortSelected = onReasoningEffortSelected,
+                    onNewChat = onNewChat,
+                )
+                AetherExtensionSlot(
+                    slot = AetherExtensionSlotChatTop,
+                    modifier = Modifier.padding(horizontal = 20.dp),
+                )
+            }
         }
         Spacer(
             modifier = Modifier
@@ -2138,8 +2161,13 @@ private fun ConversationComposerOverlay(
                 .fillMaxWidth()
                 .onSizeChanged { onBodyHeightChanged(it.height) },
         ) {
-            key(conversationStateKey) {
-                ConversationComposerBar(
+            Column {
+                AetherExtensionSlot(
+                    slot = AetherExtensionSlotChatComposerTop,
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
+                )
+                key(conversationStateKey) {
+                    ConversationComposerBar(
                     conversationStateKey = conversationStateKey,
                     value = value,
                     attachments = attachments,
@@ -2175,8 +2203,9 @@ private fun ConversationComposerOverlay(
                     onFocusChanged = onFocusChanged,
                     onSend = onSend,
                     onQueueFollowUp = onQueueFollowUp,
-                    onSteerFollowUp = onSteerFollowUp,
-                )
+                        onSteerFollowUp = onSteerFollowUp,
+                    )
+                }
             }
         }
     }
@@ -2243,6 +2272,16 @@ private fun ConversationComposerBar(
         availableMcpServers.filter { selectedMcpServerSet.contains(it.id) }
     }
     val hasSelectedActions = selectedSkillActions.isNotEmpty() || selectedMcpActions.isNotEmpty() || agentModeSelected
+    val extensionUiController = LocalAetherExtensionUiController.current
+    val hasExtensionActionTray =
+        extensionUiController
+            ?.snapshot
+            ?.componentsAt(AetherExtensionComponentChatComposerActionTray)
+            ?.isNotEmpty() == true ||
+            extensionUiController
+                ?.nativeComponents
+                ?.any { it.target == AetherExtensionComponentChatComposerActionTray } == true
+    val hasComposerActionTray = hasSelectedActions || hasExtensionActionTray
     val composerPlaceholder = when {
         value.isNotBlank() -> ""
         attachments.isNotEmpty() -> stringResource(R.string.chat_add_note)
@@ -2264,7 +2303,7 @@ private fun ConversationComposerBar(
     val canSendDraft = attachments.all { it.workspaceState == AttachmentWorkspaceState.Ready }
     val showPauseButton = isSending && !hasDraft
     val showSubmitButton = !isSending || hasDraft
-    val keepPlusSeparated = value.isNotBlank() || hasSelectedActions
+    val keepPlusSeparated = value.isNotBlank() || hasComposerActionTray
     val plusSeparated = keepPlusSeparated || (textFieldFocused && imeVisible)
     val explicitTextLineCount = if (value.isBlank()) {
         1
@@ -2288,12 +2327,12 @@ private fun ConversationComposerBar(
         ),
     )
     val fieldTopPadding = when {
-        hasSelectedActions -> 12.dp
+        hasComposerActionTray -> 12.dp
         isMultilineComposer -> 12.dp
         else -> 8.dp
     }
     val fieldBottomPadding = when {
-        hasSelectedActions -> 12.dp
+        hasComposerActionTray -> 12.dp
         isMultilineComposer -> 12.dp
         else -> 8.dp
     }
@@ -2307,7 +2346,7 @@ private fun ConversationComposerBar(
     val composerHorizontalPadding by animateDpAsState(
         targetValue = when {
             plusSeparated -> 14.dp
-            hasSelectedActions -> 18.dp
+            hasComposerActionTray -> 18.dp
             else -> 30.dp
         },
         animationSpec = tween(durationMillis = 260, easing = ChatGptMotionEasing),
@@ -2401,7 +2440,7 @@ private fun ConversationComposerBar(
         val fieldShape = if (plusSeparated) ComposerFocusedCardShape else ComposerCardShape
         val fieldControlAlignment = if (isMultilineComposer) Alignment.Bottom else Alignment.CenterVertically
         val fieldTextAlignment = if (isMultilineComposer) Alignment.TopStart else Alignment.CenterStart
-        val plusButtonAlignment = if (isMultilineComposer || hasSelectedActions) Alignment.BottomStart else Alignment.CenterStart
+        val plusButtonAlignment = if (isMultilineComposer || hasComposerActionTray) Alignment.BottomStart else Alignment.CenterStart
         Box(
             modifier = Modifier
                 .fillMaxWidth(),
@@ -2437,10 +2476,10 @@ private fun ConversationComposerBar(
                             top = fieldTopPadding,
                             bottom = fieldBottomPadding,
                         ),
-                    verticalArrangement = Arrangement.spacedBy(if (hasSelectedActions) 10.dp else 0.dp),
+                    verticalArrangement = Arrangement.spacedBy(if (hasComposerActionTray) 10.dp else 0.dp),
                 ) {
                     AnimatedVisibility(
-                        visible = hasSelectedActions,
+                        visible = hasComposerActionTray,
                         enter = fadeIn(
                             animationSpec = tween(durationMillis = 220, easing = ChatGptMotionEasing),
                         ) + slideInVertically(
@@ -2454,15 +2493,20 @@ private fun ConversationComposerBar(
                             targetOffsetY = { -it / 3 },
                         ),
                     ) {
-                        ComposerActionTray(
+                        AetherExtensionComponentHost(
+                            target = AetherExtensionComponentChatComposerActionTray,
                             modifier = Modifier.fillMaxWidth(),
-                            skills = selectedSkillActions,
-                            mcpServers = selectedMcpActions,
-                            agentModeSelected = agentModeSelected,
-                            onRemoveSkill = { skillId -> onSetSkillSelected(skillId, false) },
-                            onRemoveMcpServer = { serverId -> onSetMcpServerSelected(serverId, false) },
-                            onRemoveAgentMode = { onSetAgentModeSelected(false) },
-                        )
+                        ) {
+                            ComposerActionTray(
+                                modifier = Modifier.fillMaxWidth(),
+                                skills = selectedSkillActions,
+                                mcpServers = selectedMcpActions,
+                                agentModeSelected = agentModeSelected,
+                                onRemoveSkill = { skillId -> onSetSkillSelected(skillId, false) },
+                                onRemoveMcpServer = { serverId -> onSetMcpServerSelected(serverId, false) },
+                                onRemoveAgentMode = { onSetAgentModeSelected(false) },
+                            )
+                        }
                     }
 
                     Row(
@@ -2700,20 +2744,25 @@ private fun ConversationComposerBar(
                                             },
                                         )
                                     }
-                                    availableSkills.forEach { skill ->
-                                        val selected = selectedSkillSet.contains(skill.id)
-                                        ComposerPlusMenuRow(
-                                            title = skill.quickActionLabel(),
-                                            icon = Icons.Rounded.Extension,
-                                            selected = selected,
-                                            iconTint = Color(0xFF9C6B2F),
-                                            iconContainerColor = AetherSurfaceHigh,
-                                            onClick = {
-                                                runAfterAttachmentMenuDismiss {
-                                                    onSetSkillSelected(skill.id, !selected)
-                                                }
-                                            },
-                                        )
+                                    AetherExtensionComponentHost(
+                                        target = AetherExtensionComponentChatComposerSkillPicker,
+                                        modifier = Modifier.fillMaxWidth(),
+                                    ) {
+                                        availableSkills.forEach { skill ->
+                                            val selected = selectedSkillSet.contains(skill.id)
+                                            ComposerPlusMenuRow(
+                                                title = skill.quickActionLabel(),
+                                                icon = Icons.Rounded.Extension,
+                                                selected = selected,
+                                                iconTint = Color(0xFF9C6B2F),
+                                                iconContainerColor = AetherSurfaceHigh,
+                                                onClick = {
+                                                    runAfterAttachmentMenuDismiss {
+                                                        onSetSkillSelected(skill.id, !selected)
+                                                    }
+                                                },
+                                            )
+                                        }
                                     }
                                     availableMcpServers.forEach { server ->
                                         val selected = selectedMcpServerSet.contains(server.id)

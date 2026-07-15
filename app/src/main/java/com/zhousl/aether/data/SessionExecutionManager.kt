@@ -489,14 +489,25 @@ class SessionExecutionManager(
         }
 
         return try {
-            var resolvedActiveSkills = resolveSelectedActiveSkills(
-                selectedSkillIds = request.selectedSkillIds,
-                existingActiveSkills = request.activeSkills,
-            )
-            var resolvedSelectedSkillIds = resolvedActiveSkills.map { it.skillId }
             val resolvedAvailableSkills = currentExtensionsState.value.installedSkills
                 .filter { it.isEnabled }
                 .sortedBy { it.name.lowercase() }
+            val explicitlySelectedSkills = resolveSelectedActiveSkills(
+                selectedSkillIds = request.selectedSkillIds,
+            )
+            val implicitlySelectedSkills = skillManager.findImplicitlyRelevantSkills(
+                skills = resolvedAvailableSkills,
+                messages = request.requestMessages,
+                excludedSkillIds = explicitlySelectedSkills.map { it.skillId }.toSet(),
+            )
+            var resolvedSkillSelection = resolveTurnSkillSelection(
+                explicitActiveSkills = explicitlySelectedSkills,
+                implicitActiveSkills = implicitlySelectedSkills.mapNotNull { skill ->
+                    skillManager.buildActiveSkillContext(skill).getOrNull()
+                },
+            )
+            var resolvedActiveSkills = resolvedSkillSelection.activeSkills
+            var resolvedSelectedSkillIds = resolvedSkillSelection.selectedSkillIds
             val resolvedMcpServers = resolveSelectedMcpServers(request.activeMcpServerIds)
             val resolvedMcpServerIds = resolvedMcpServers.map { it.id }
             updateSessionSelections(
@@ -512,7 +523,7 @@ class SessionExecutionManager(
             )
             val runtimeWorkspaceDirectory = runtimeRouter.runtimeWorkspaceDirectory(
                 settings = request.settings,
-                sharedTermuxWorkspace = workspaceDirectory,
+                termuxWorkspaceDirectory = workspaceDirectory,
             )
             diagnosticLogger.event(
                 category = "mcp",
@@ -527,6 +538,7 @@ class SessionExecutionManager(
             mcpClientManager.syncServers(
                 servers = resolvedMcpServers,
                 workspaceDirectory = runtimeWorkspaceDirectory,
+                termuxWorkspaceDirectory = workspaceDirectory,
             )
             diagnosticLogger.event(
                 category = "mcp",
@@ -556,6 +568,7 @@ class SessionExecutionManager(
                     settings = request.settings,
                 ),
                 workspaceDirectory = runtimeWorkspaceDirectory,
+                termuxWorkspaceDirectory = workspaceDirectory,
                 availableSkills = resolvedAvailableSkills,
                 activeSkills = resolvedActiveSkills,
                 mcpToolBindings = mcpClientManager.toolBindings(),
@@ -629,7 +642,11 @@ class SessionExecutionManager(
                 onSkillActivated = { activeSkill ->
                     if (handle.pauseRequested) return@runTurn
                     resolvedSelectedSkillIds = (resolvedSelectedSkillIds + activeSkill.skillId).distinct()
-                    resolvedActiveSkills = upsertActiveSkillContext(resolvedActiveSkills, activeSkill)
+                    resolvedSkillSelection = resolvedSkillSelection.copy(
+                        selectedSkillIds = resolvedSelectedSkillIds,
+                        activeSkills = upsertActiveSkillContext(resolvedActiveSkills, activeSkill),
+                    )
+                    resolvedActiveSkills = resolvedSkillSelection.activeSkills
                     updateSessionSelections(
                         sessionId = handle.sessionId,
                         selectedSkillIds = resolvedSelectedSkillIds,
@@ -829,7 +846,6 @@ class SessionExecutionManager(
 
     private suspend fun resolveSelectedActiveSkills(
         selectedSkillIds: List<String>,
-        existingActiveSkills: List<ActiveSkillContext>,
     ): List<ActiveSkillContext> {
         if (selectedSkillIds.isEmpty()) return emptyList()
         val installedSkillsById = currentExtensionsState.value.installedSkills
@@ -844,6 +860,14 @@ class SessionExecutionManager(
             }
         }
     }
+
+    private fun resolveTurnSkillSelection(
+        explicitActiveSkills: List<ActiveSkillContext>,
+        implicitActiveSkills: List<ActiveSkillContext>,
+    ): TurnSkillSelection = resolveTurnSkillSelectionForTest(
+        explicitActiveSkills = explicitActiveSkills,
+        implicitActiveSkills = implicitActiveSkills,
+    )
 
     private fun upsertActiveSkillContext(
         activeSkills: List<ActiveSkillContext>,
@@ -2558,6 +2582,22 @@ class SessionExecutionManager(
             }
         }
     }
+}
+
+internal data class TurnSkillSelection(
+    val selectedSkillIds: List<String>,
+    val activeSkills: List<ActiveSkillContext>,
+)
+
+internal fun resolveTurnSkillSelectionForTest(
+    explicitActiveSkills: List<ActiveSkillContext>,
+    implicitActiveSkills: List<ActiveSkillContext>,
+): TurnSkillSelection {
+    val normalizedExplicitSkills = explicitActiveSkills.distinctBy { it.skillId }
+    return TurnSkillSelection(
+        selectedSkillIds = normalizedExplicitSkills.map { it.skillId },
+        activeSkills = (normalizedExplicitSkills + implicitActiveSkills).distinctBy { it.skillId },
+    )
 }
 
 internal fun shouldInlineWorkspaceImageAttachment(

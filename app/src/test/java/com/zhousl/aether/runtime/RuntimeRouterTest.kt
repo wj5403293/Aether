@@ -56,6 +56,33 @@ class RuntimeRouterTest {
     }
 
     @Test
+    fun workspaceDirectoryFollowsExplicitRuntimeEnvironment() {
+        val settings = AppSettings(
+            enabledRuntimeIds = setOf(LocalRuntimeId.Termux, LocalRuntimeId.Alpine),
+            defaultRuntimeId = LocalRuntimeId.Alpine,
+            termuxSetupCompleted = true,
+            alpineSetupCompleted = true,
+        )
+
+        assertEquals(
+            "/data/data/com.termux/files/home/.aether/workspaces/session-1",
+            router.runtimeWorkspaceDirectory(
+                settings = settings,
+                termuxWorkspaceDirectory = "/data/data/com.termux/files/home/.aether/workspaces/session-1",
+                environment = "termux",
+            ),
+        )
+        assertEquals(
+            "/workspace",
+            router.runtimeWorkspaceDirectory(
+                settings = settings.copy(defaultRuntimeId = LocalRuntimeId.Termux),
+                termuxWorkspaceDirectory = "/data/data/com.termux/files/home/.aether/workspaces/session-1",
+                environment = "alpine",
+            ),
+        )
+    }
+
+    @Test
     fun noConfiguredRuntimeReturnsNullForDefault() {
         assertNull(router.runtimeFor(AppSettings(), null))
     }

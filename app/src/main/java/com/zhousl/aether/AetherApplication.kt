@@ -10,11 +10,15 @@ import com.posthog.android.PostHogAndroidConfig
 import com.zhousl.aether.data.AgentExtensionsRepository
 import com.zhousl.aether.data.AgentModeController
 import com.zhousl.aether.data.AgentSkillManager
+import com.zhousl.aether.data.AetherAppExtensionManager
+import com.zhousl.aether.data.AetherModKernel
 import com.zhousl.aether.data.AetherDiagnosticLogger
 import com.zhousl.aether.data.AetherToolExecutor
 import com.zhousl.aether.data.ChatRepository
 import com.zhousl.aether.data.PiExtensionManager
+import com.zhousl.aether.data.PiExtensionStateRepository
 import com.zhousl.aether.data.RootSetupController
+import com.zhousl.aether.data.RuntimeWorkspaceFileBridge
 import com.zhousl.aether.data.ChatStateStore
 import com.zhousl.aether.data.ScheduledTask
 import com.zhousl.aether.data.ScheduledTaskManager
@@ -27,6 +31,7 @@ import com.zhousl.aether.data.WorkspaceFileBridge
 import com.zhousl.aether.data.pi.PiCompletionClient
 import com.zhousl.aether.data.pi.PiAgentRunner
 import com.zhousl.aether.data.pi.PiKernelBridge
+import com.zhousl.aether.mod.AetherNativeModManager
 import com.zhousl.aether.runtime.AlpineRuntime
 import com.zhousl.aether.runtime.RuntimeRouter
 import com.zhousl.aether.runtime.TermuxRuntime
@@ -97,6 +102,8 @@ class AetherAppRuntime(
     )
 
     val settingsRepository = SettingsRepository(application)
+    val piExtensionStateRepository = PiExtensionStateRepository(application)
+    val modKernel = AetherModKernel()
     val chatRepository = ChatRepository(application)
     val extensionsRepository = AgentExtensionsRepository(application)
     val scheduledTaskRepository = ScheduledTaskRepository(application)
@@ -107,6 +114,14 @@ class AetherAppRuntime(
     val termuxRuntime = TermuxRuntime(bashTool)
     val alpineRuntime = AlpineRuntime(
         context = application,
+        diagnosticLogger = diagnosticLogger,
+    )
+    val nativeModManager = AetherNativeModManager(
+        context = application,
+        application = application,
+        alpineRuntime = alpineRuntime,
+        kernel = modKernel,
+        piExtensionStateRepository = piExtensionStateRepository,
         diagnosticLogger = diagnosticLogger,
     )
     val piKernelBridge = PiKernelBridge(
@@ -130,10 +145,16 @@ class AetherAppRuntime(
         context = application,
         bashTool = bashTool,
     )
+    val runtimeWorkspaceFileBridge = RuntimeWorkspaceFileBridge(
+        context = application,
+        runtimeRouter = runtimeRouter,
+        alpineRuntime = alpineRuntime,
+        termuxFileBridge = workspaceFileBridge,
+    )
     val agentModeController = AgentModeController(
         context = application,
         bashTool = bashTool,
-        workspaceFileBridge = workspaceFileBridge,
+        runtimeWorkspaceFileBridge = runtimeWorkspaceFileBridge,
         diagnosticLogger = diagnosticLogger,
     )
     val skillManager = AgentSkillManager(
@@ -145,17 +166,25 @@ class AetherAppRuntime(
         alpineRuntime = alpineRuntime,
         piKernelBridge = piKernelBridge,
         skillManager = skillManager,
+        stateRepository = piExtensionStateRepository,
+    )
+    val aetherAppExtensionManager = AetherAppExtensionManager(
+        bridge = piKernelBridge,
+        scope = appScope,
+        diagnosticLogger = diagnosticLogger,
+        loadOptionsProvider = piExtensionStateRepository::loadOptions,
     )
     val webToolsClient = WebToolsClient()
     val piAgentRunner = PiAgentRunner(
         bridge = piKernelBridge,
         settingsRepository = settingsRepository,
+        piExtensionStateRepository = piExtensionStateRepository,
         diagnosticLogger = diagnosticLogger,
         toolExecutor = AetherToolExecutor(
             runtimeRouter = runtimeRouter,
             skillManager = skillManager,
             webToolsClient = webToolsClient,
-            workspaceFileBridge = workspaceFileBridge,
+            runtimeWorkspaceFileBridge = runtimeWorkspaceFileBridge,
             piCompletionClient = piCompletionClient,
             agentModeController = agentModeController,
         ),
@@ -209,6 +238,9 @@ class AetherAppRuntime(
         )
         notificationController.ensureChannels()
         ProcessLifecycleOwner.get().lifecycle.addObserver(appForegroundTracker)
+        appScope.launch {
+            nativeModManager.initialize()
+        }
         appScope.launch {
             settingsRepository.migrateLegacyProvidersToPi()
         }

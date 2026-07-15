@@ -4,6 +4,7 @@ import com.zhousl.aether.data.pi.PiCompletionClient
 import com.zhousl.aether.runtime.RuntimeFilesystemTool
 import com.zhousl.aether.runtime.RuntimeRouter
 import com.zhousl.aether.runtime.RuntimeShellTool
+import com.zhousl.aether.runtime.runtimeEnvironment
 import java.io.File
 import java.util.Base64
 import kotlinx.coroutines.CancellationException
@@ -50,10 +51,10 @@ data class AetherToolExecutionResult(
 }
 
 class AetherToolExecutor(
-    runtimeRouter: RuntimeRouter,
+    private val runtimeRouter: RuntimeRouter,
     private val skillManager: AgentSkillManager? = null,
     private val webToolsClient: WebToolsClient? = null,
-    private val workspaceFileBridge: WorkspaceFileBridge? = null,
+    private val runtimeWorkspaceFileBridge: RuntimeWorkspaceFileBridge? = null,
     private val piCompletionClient: PiCompletionClient? = null,
     private val agentModeController: AgentModeController? = null,
 ) {
@@ -63,6 +64,7 @@ class AetherToolExecutor(
     suspend fun execute(
         settings: AppSettings,
         workspaceDirectory: String,
+        termuxWorkspaceDirectory: String,
         toolName: String,
         argumentsJson: String,
         availableSkills: List<InstalledSkill> = emptyList(),
@@ -74,34 +76,43 @@ class AetherToolExecutor(
         onProgress: (suspend (String) -> Unit)? = null,
         onSkillActivated: suspend (ActiveSkillContext) -> Unit = {},
     ): AetherToolExecutionResult {
+        val localRuntimeArgumentsJson by lazy(LazyThreadSafetyMode.NONE) {
+            injectDefaultWorkingDirectory(
+                argumentsJson = argumentsJson,
+                settings = settings,
+                runtimeRouter = runtimeRouter,
+                workspaceDirectory = workspaceDirectory,
+                termuxWorkspaceDirectory = termuxWorkspaceDirectory,
+            )
+        }
         val rawOutput = when (toolName) {
             "read" -> filesystemTool.executeRead(
                 settings,
-                injectDefaultWorkingDirectory(argumentsJson, workspaceDirectory),
+                localRuntimeArgumentsJson,
             )
             "edit" -> filesystemTool.executeEdit(
                 settings,
-                injectDefaultWorkingDirectory(argumentsJson, workspaceDirectory),
+                localRuntimeArgumentsJson,
             )
             "write" -> filesystemTool.executeWrite(
                 settings,
-                injectDefaultWorkingDirectory(argumentsJson, workspaceDirectory),
+                localRuntimeArgumentsJson,
             )
             "grep" -> filesystemTool.executeGrep(
                 settings,
-                injectDefaultWorkingDirectory(argumentsJson, workspaceDirectory),
+                localRuntimeArgumentsJson,
             )
             "find" -> filesystemTool.executeFind(
                 settings,
-                injectDefaultWorkingDirectory(argumentsJson, workspaceDirectory),
+                localRuntimeArgumentsJson,
             )
             "ls" -> filesystemTool.executeLs(
                 settings,
-                injectDefaultWorkingDirectory(argumentsJson, workspaceDirectory),
+                localRuntimeArgumentsJson,
             )
             "bash" -> shellTool.execute(
                 settings,
-                injectDefaultWorkingDirectory(argumentsJson, workspaceDirectory),
+                localRuntimeArgumentsJson,
                 onProgress = onProgress,
             )
             "fetch_bash_output" -> shellTool.fetch(settings, argumentsJson)
@@ -126,12 +137,14 @@ class AetherToolExecutor(
                 settings = settings,
                 providerConfigs = providerConfigs,
                 workspaceDirectory = workspaceDirectory,
+                termuxWorkspaceDirectory = termuxWorkspaceDirectory,
                 argumentsJson = argumentsJson,
             )
             "agent_display" -> if (agentModeEnabled) {
                 agentModeController?.execute(
                     settings = settings,
                     workspaceDirectory = workspaceDirectory,
+                    termuxWorkspaceDirectory = termuxWorkspaceDirectory,
                     argumentsJson = argumentsJson,
                 ) ?: toolUnavailableOutput("agent_display")
             } else {
@@ -444,9 +457,10 @@ class AetherToolExecutor(
         settings: AppSettings,
         providerConfigs: List<LlmProviderConfig>,
         workspaceDirectory: String,
+        termuxWorkspaceDirectory: String,
         argumentsJson: String,
     ): String {
-        val fileBridge = workspaceFileBridge ?: return toolUnavailableOutput("analyze_image")
+        val fileBridge = runtimeWorkspaceFileBridge ?: return toolUnavailableOutput("analyze_image")
         val completionClient = piCompletionClient ?: return toolUnavailableOutput("analyze_image")
         val arguments = runCatching { JSONObject(argumentsJson) }.getOrNull()
             ?: return invalidToolArguments()
@@ -473,12 +487,15 @@ class AetherToolExecutor(
             fallbackModelKey = resolveDefaultChatModelKey(settings, providerConfigs),
         )
         val payload = fileBridge.readWorkspaceFile(
+            settings = settings,
+            workspaceDirectory = workspaceDirectory,
+            termuxWorkspaceDirectory = termuxWorkspaceDirectory,
             path = path,
             workingDirectory = workingDirectory,
             byteLimit = MaxToolAnalyzeImageBytes,
         ).getOrElse { throwable ->
             return toolFailureOutput(throwable, "Couldn't read the image from the workspace.") {
-                put("path", fileBridge.resolveTermuxPath(path, workingDirectory))
+                put("path", path)
             }
         }
         val mimeType = guessImageMimeType(fileBridge, payload.absolutePath)
@@ -1233,7 +1250,7 @@ private fun looksLikeMcpToolCallName(toolName: String): Boolean =
     toolName.startsWith("mcp__") || toolName.contains(':')
 
 private fun guessImageMimeType(
-    workspaceFileBridge: WorkspaceFileBridge,
+    workspaceFileBridge: RuntimeWorkspaceFileBridge,
     path: String,
 ): String? {
     val guessedMimeType = workspaceFileBridge.guessMimeType(path)
@@ -1274,9 +1291,12 @@ private fun unknownToolOutput(toolName: String): String =
         put("error", "Unknown tool '$toolName'.")
     }.toString()
 
-private fun injectDefaultWorkingDirectory(
+internal fun injectDefaultWorkingDirectory(
     argumentsJson: String,
+    settings: AppSettings,
+    runtimeRouter: RuntimeRouter,
     workspaceDirectory: String,
+    termuxWorkspaceDirectory: String,
 ): String {
     val arguments = runCatching { JSONObject(argumentsJson) }.getOrNull() ?: return argumentsJson
 
@@ -1289,7 +1309,14 @@ private fun injectDefaultWorkingDirectory(
     when {
         snake.isNotBlank() -> arguments.put("working_directory", snake)
         camel.isNotBlank() -> arguments.put("working_directory", camel)
-        else -> arguments.put("working_directory", workspaceDirectory)
+        else -> arguments.put(
+            "working_directory",
+            runtimeRouter.runtimeWorkspaceDirectory(
+                settings = settings,
+                termuxWorkspaceDirectory = termuxWorkspaceDirectory,
+                environment = arguments.runtimeEnvironment(),
+            ).ifBlank { workspaceDirectory },
+        )
     }
 
     return arguments.toString()

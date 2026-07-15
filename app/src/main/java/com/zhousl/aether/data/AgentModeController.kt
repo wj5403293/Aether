@@ -113,7 +113,7 @@ data class AgentModeAuthorizationState(
 class AgentModeController(
     private val context: Context,
     private val bashTool: TermuxBashTool,
-    private val workspaceFileBridge: WorkspaceFileBridge,
+    private val runtimeWorkspaceFileBridge: RuntimeWorkspaceFileBridge,
     private val diagnosticLogger: AetherDiagnosticLogger = AetherDiagnosticLogger.NoOp,
 ) {
     private val displayManager = context.getSystemService<DisplayManager>()!!
@@ -193,6 +193,7 @@ class AgentModeController(
     suspend fun execute(
         settings: AppSettings,
         workspaceDirectory: String,
+        termuxWorkspaceDirectory: String,
         argumentsJson: String,
     ): String = withContext(Dispatchers.IO) {
         if (!settings.agentModeAuthorizationEnabled) {
@@ -232,7 +233,12 @@ class AgentModeController(
             when (action) {
             "start" -> {
                 ensureDisplay(settings)
-                captureAfterDelay(settings, workspaceDirectory, delayMillis = 350)
+                captureAfterDelay(
+                    settings,
+                    workspaceDirectory,
+                    termuxWorkspaceDirectory,
+                    delayMillis = 350,
+                )
             }
             "status" -> statusResult(settings)
             "list_apps", "apps", "installed_apps" -> listInstalledAppsResult(settings, arguments)
@@ -243,7 +249,12 @@ class AgentModeController(
                     invalidArguments("Missing required 'target' argument.")
                 } else {
                     launchTarget(settings, target)
-                    captureAfterDelay(settings, workspaceDirectory, delayMillis = 900)
+                    captureAfterDelay(
+                        settings,
+                        workspaceDirectory,
+                        termuxWorkspaceDirectory,
+                        delayMillis = 900,
+                    )
                 }
             }
             "tap" -> {
@@ -255,7 +266,12 @@ class AgentModeController(
                 } else {
                     requireAgentModeService(settings).tap(displayId, x, y)
                     updateCursorPosition(x, y, animationDurationMillis = 180)
-                    captureAfterDelay(settings, workspaceDirectory, delayMillis = 350)
+                    captureAfterDelay(
+                        settings,
+                        workspaceDirectory,
+                        termuxWorkspaceDirectory,
+                        delayMillis = 350,
+                    )
                 }
             }
             "swipe" -> {
@@ -275,7 +291,12 @@ class AgentModeController(
                         updateCursorPosition(x2, y2, animationDurationMillis = durationMs)
                     }
                     requireAgentModeService(settings).swipe(displayId, x1, y1, x2, y2, durationMs)
-                    captureAfterDelay(settings, workspaceDirectory, delayMillis = durationMs.toLong() + 250)
+                    captureAfterDelay(
+                        settings,
+                        workspaceDirectory,
+                        termuxWorkspaceDirectory,
+                        delayMillis = durationMs.toLong() + 250,
+                    )
                 }
             }
             "key" -> {
@@ -285,7 +306,12 @@ class AgentModeController(
                     invalidArguments("Missing required 'key' argument.")
                 } else {
                     requireAgentModeService(settings).key(displayId, keyCode)
-                    captureAfterDelay(settings, workspaceDirectory, delayMillis = 300)
+                    captureAfterDelay(
+                        settings,
+                        workspaceDirectory,
+                        termuxWorkspaceDirectory,
+                        delayMillis = 300,
+                    )
                 }
             }
             "text" -> {
@@ -295,12 +321,22 @@ class AgentModeController(
                     invalidArguments("Missing required 'text' argument.")
                 } else {
                     requireAgentModeService(settings).text(displayId, text)
-                    captureAfterDelay(settings, workspaceDirectory, delayMillis = 350)
+                    captureAfterDelay(
+                        settings,
+                        workspaceDirectory,
+                        termuxWorkspaceDirectory,
+                        delayMillis = 350,
+                    )
                 }
             }
             "screenshot" -> {
                 ensureDisplay(settings)
-                captureAfterDelay(settings, workspaceDirectory, delayMillis = 0)
+                captureAfterDelay(
+                    settings,
+                    workspaceDirectory,
+                    termuxWorkspaceDirectory,
+                    delayMillis = 0,
+                )
             }
             "stop" -> {
                 releaseDisplay()
@@ -691,6 +727,7 @@ class AgentModeController(
     private suspend fun captureAfterDelay(
         settings: AppSettings,
         workspaceDirectory: String,
+        termuxWorkspaceDirectory: String,
         delayMillis: Long,
     ): String {
         if (delayMillis > 0) delay(delayMillis)
@@ -705,7 +742,10 @@ class AgentModeController(
         previewFile.copyTo(latestPreviewFile, overwrite = true)
         val previewPath = previewFile.absolutePath
         val workspacePath = "$workspaceDirectory/agent-mode/$captureId.$AgentModeCaptureExtension"
-        workspaceFileBridge.writeWorkspaceBytes(
+        runtimeWorkspaceFileBridge.writeWorkspaceBytes(
+            settings = settings,
+            workspaceDirectory = workspaceDirectory,
+            termuxWorkspaceDirectory = termuxWorkspaceDirectory,
             absolutePath = workspacePath,
             bytes = bytes,
         ).getOrThrow()

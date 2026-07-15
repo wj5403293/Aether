@@ -1,5 +1,6 @@
 package com.zhousl.aether.data.pi
 
+import com.zhousl.aether.data.PiExtensionLoadOptions
 import com.zhousl.aether.data.AetherDiagnosticLogger
 import com.zhousl.aether.data.DiagnosticRedactor
 import com.zhousl.aether.runtime.AlpineRuntime
@@ -218,36 +219,144 @@ class PiKernelBridge(
             abortOnCancellation = false,
         )
 
-    suspend fun installExtensionPackage(source: String): JSONObject =
+    suspend fun installExtensionPackage(
+        source: String,
+        loadOptions: PiExtensionLoadOptions = PiExtensionLoadOptions(),
+    ): JSONObject =
         request(
             type = "install_extension_package",
-            payload = JSONObject().put("source", source),
+            payload = extensionLoadOptionsPayload(loadOptions).put("source", source),
             timeoutMillis = PiBridgeRequestTimeoutMillis,
             abortOnCancellation = false,
         )
 
-    suspend fun removeExtensionPackage(source: String): JSONObject =
+    suspend fun removeExtensionPackage(
+        source: String,
+        loadOptions: PiExtensionLoadOptions = PiExtensionLoadOptions(),
+    ): JSONObject =
         request(
             type = "remove_extension_package",
-            payload = JSONObject().put("source", source),
+            payload = extensionLoadOptionsPayload(loadOptions).put("source", source),
             timeoutMillis = PiBridgeRequestTimeoutMillis,
             abortOnCancellation = false,
         )
 
-    suspend fun updateExtensionPackage(source: String): JSONObject =
+    suspend fun updateExtensionPackage(
+        source: String,
+        loadOptions: PiExtensionLoadOptions = PiExtensionLoadOptions(),
+    ): JSONObject =
         request(
             type = "update_extension_package",
-            payload = JSONObject().put("source", source),
+            payload = extensionLoadOptionsPayload(loadOptions).put("source", source),
             timeoutMillis = PiBridgeRequestTimeoutMillis,
             abortOnCancellation = false,
         )
 
-    suspend fun reloadAllExtensions(): JSONObject =
+    suspend fun reloadAllExtensions(
+        loadOptions: PiExtensionLoadOptions = PiExtensionLoadOptions(),
+    ): JSONObject =
         request(
             type = "reload_all_extensions",
+            payload = extensionLoadOptionsPayload(loadOptions),
             timeoutMillis = PiBridgeRequestTimeoutMillis,
             abortOnCancellation = false,
         )
+
+    suspend fun reloadAetherExtensions(
+        context: JSONObject,
+        loadOptions: PiExtensionLoadOptions = PiExtensionLoadOptions(),
+        onEvent: suspend (String, JSONObject) -> Unit,
+    ): JSONObject =
+        request(
+            type = "reload_aether_extensions",
+            payload = extensionLoadOptionsPayload(loadOptions).put("context", context),
+            timeoutMillis = PiBridgeRequestTimeoutMillis,
+            onEvent = onEvent,
+            abortOnCancellation = false,
+        )
+
+    suspend fun getAetherExtensions(
+        context: JSONObject,
+        loadOptions: PiExtensionLoadOptions = PiExtensionLoadOptions(),
+        onEvent: suspend (String, JSONObject) -> Unit,
+    ): JSONObject =
+        request(
+            type = "get_aether_extensions",
+            payload = extensionLoadOptionsPayload(loadOptions).put("context", context),
+            timeoutMillis = PiBridgeRequestTimeoutMillis,
+            onEvent = onEvent,
+            abortOnCancellation = false,
+        )
+
+    suspend fun invokeAetherExtensionAction(
+        extensionId: String,
+        action: String,
+        args: JSONObject,
+        context: JSONObject,
+        onEvent: suspend (String, JSONObject) -> Unit,
+    ): JSONObject =
+        request(
+            type = "invoke_aether_extension_action",
+            payload = JSONObject()
+                .put("extension_id", extensionId)
+                .put("action", action)
+                .put("args", args)
+                .put("context", context),
+            timeoutMillis = PiBridgeRequestTimeoutMillis,
+            onEvent = onEvent,
+            abortOnCancellation = false,
+        )
+
+    suspend fun dispatchAetherExtensionEvent(
+        event: String,
+        data: JSONObject,
+        context: JSONObject,
+        onEvent: suspend (String, JSONObject) -> Unit,
+    ): JSONObject =
+        request(
+            type = "dispatch_aether_extension_event",
+            payload = JSONObject()
+                .put("event", event)
+                .put("data", data)
+                .put("context", context),
+            timeoutMillis = PiBridgeRequestTimeoutMillis,
+            onEvent = onEvent,
+            abortOnCancellation = false,
+        )
+
+    suspend fun subscribeAetherExtensions(
+        onEvent: suspend (String, JSONObject) -> Unit,
+    ) {
+        request(
+            type = "subscribe_aether_extensions",
+            timeoutMillis = null,
+            onEvent = onEvent,
+            abortOnCancellation = false,
+        )
+    }
+
+    suspend fun sendAetherHostResult(
+        callId: String,
+        result: JSONObject = JSONObject(),
+        error: String = "",
+    ): JSONObject =
+        request(
+            type = "aether_host_result",
+            payload = JSONObject()
+                .put("call_id", callId)
+                .put("ok", error.isBlank())
+                .put("result", result)
+                .put("error", error),
+            timeoutMillis = PiBridgePingTimeoutMillis,
+            abortOnCancellation = false,
+        )
+
+    private fun extensionLoadOptionsPayload(
+        loadOptions: PiExtensionLoadOptions,
+    ): JSONObject = JSONObject().apply {
+        put("disabled_extension_paths", org.json.JSONArray(loadOptions.disabledExtensionPaths.toList()))
+        put("disabled_package_sources", org.json.JSONArray(loadOptions.disabledPackageSources.toList()))
+    }
 
     suspend fun sendHostToolResult(payload: JSONObject) {
         request(
@@ -287,7 +396,7 @@ class PiKernelBridge(
     private suspend fun request(
         type: String,
         payload: JSONObject = JSONObject(),
-        timeoutMillis: Long,
+        timeoutMillis: Long?,
         onEvent: (suspend (String, JSONObject) -> Unit)? = null,
         abortOnCancellation: Boolean = type == "run_turn" || type == "complete_once" || type == "follow_up",
         onSetupProgress: (PiCoreSetupPhase) -> Unit = {},
@@ -351,7 +460,11 @@ class PiKernelBridge(
                 requestProcess.writer.newLine()
                 requestProcess.writer.flush()
             }
-            val frame = withTimeout(timeoutMillis) { response.await() }
+            val frame = if (timeoutMillis == null) {
+                response.await()
+            } else {
+                withTimeout(timeoutMillis) { response.await() }
+            }
             if (!frame.ok || frame.type == "error") {
                 val error = frame.error
                 throw PiBridgeException(

@@ -188,6 +188,8 @@ fun ConversationDrawer(
     onDeleteSession: (String) -> Unit,
     onSettingsSelected: () -> Unit,
 ) {
+    val extensionController = LocalAetherExtensionUiController.current
+    val extensionPages = extensionController?.snapshot?.pages.orEmpty()
     var searchExpanded by rememberSaveable { mutableStateOf(false) }
     var searchQuery by rememberSaveable { mutableStateOf("") }
     var overlayHeightPx by remember { mutableIntStateOf(0) }
@@ -227,16 +229,29 @@ fun ConversationDrawer(
                             bottom = 96.dp,
                         )
                 ) {
-                    Text(
-                        text = if (sessions.isEmpty()) {
-                            stringResource(R.string.chat_no_conversations_yet)
-                        } else {
-                            stringResource(R.string.search_no_chats_match)
-                        },
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = AetherOnSurfaceVariant,
-                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp),
-                    )
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            text = if (sessions.isEmpty()) {
+                                stringResource(R.string.chat_no_conversations_yet)
+                            } else {
+                                stringResource(R.string.search_no_chats_match)
+                            },
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = AetherOnSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp),
+                        )
+                        AetherExtensionSlot(AetherExtensionSlotDrawer)
+                        extensionPages.forEach { page ->
+                            AetherExtensionPageLauncher(
+                                page = page,
+                                onClick = {
+                                    searchExpanded = false
+                                    searchQuery = ""
+                                    extensionController?.onOpenPage?.invoke(page.id)
+                                },
+                            )
+                        }
+                    }
                 }
             } else {
                 LazyColumn(
@@ -266,6 +281,23 @@ fun ConversationDrawer(
                             onRename = { title -> onRenameSession(session.id, title) },
                             onExport = { onExportSession(session) },
                             onDelete = { onDeleteSession(session.id) },
+                        )
+                    }
+                    item(key = "aether-extension-drawer-slot") {
+                        AetherExtensionSlot(
+                            slot = AetherExtensionSlotDrawer,
+                            modifier = Modifier.padding(top = 10.dp),
+                        )
+                    }
+                    items(extensionPages, key = { it.id }) { page ->
+                        AetherExtensionPageLauncher(
+                            page = page,
+                            onClick = {
+                                searchExpanded = false
+                                searchQuery = ""
+                                extensionController?.onOpenPage?.invoke(page.id)
+                            },
+                            modifier = Modifier.padding(top = 6.dp),
                         )
                     }
                 }

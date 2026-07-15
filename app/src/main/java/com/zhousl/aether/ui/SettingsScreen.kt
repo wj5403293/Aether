@@ -82,6 +82,7 @@ import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -172,6 +173,7 @@ import com.zhousl.aether.data.normalizeOldCommandHistoryRetentionHours
 import com.zhousl.aether.data.normalizeTavilyBaseUrl
 import com.zhousl.aether.data.quickActionLabel
 import com.zhousl.aether.data.resolveAutomaticModelKey
+import com.zhousl.aether.mod.AetherNativeModState
 import com.zhousl.aether.runtime.LocalRuntimeIssue
 import com.zhousl.aether.runtime.LocalRuntimeSetupState
 import com.zhousl.aether.runtime.AlpineTerminalLaunchSpec
@@ -427,6 +429,7 @@ fun SettingsScreen(
     developerTermuxReadyOverride: Boolean?,
     installedSkills: List<com.zhousl.aether.data.InstalledSkill>,
     installedPiExtensions: List<InstalledPiExtension>,
+    nativeModState: AetherNativeModState,
     piExtensionCatalog: List<PiExtensionCatalogEntry>,
     isLoadingPiExtensions: Boolean,
     piExtensionCatalogError: String,
@@ -479,7 +482,10 @@ fun SettingsScreen(
     onLoadPiPackageDetails: (PiExtensionCatalogEntry) -> Unit,
     onUpdatePiExtensionPackage: (String) -> Unit,
     onRemovePiExtension: (InstalledPiExtension) -> Unit,
+    onSetPiExtensionEnabled: (InstalledPiExtension, Boolean) -> Unit,
     onImportPiExtension: () -> Unit,
+    onAllowNativeModsOnNextStart: () -> Unit,
+    onDisableNativeModsOnNextStart: () -> Unit,
     onSaveHttpMcpServer: (String?, String, String, String) -> Unit,
     onSaveStdIoMcpServer: (String?, String, String, String, String, String, LocalRuntimeId?) -> Unit,
     onToggleMcpServerEnabled: (String, Boolean) -> Unit,
@@ -1015,6 +1021,7 @@ fun SettingsScreen(
 
             SettingsPage.Extensions -> PiExtensionsPage(
                 installedExtensions = installedPiExtensions,
+                nativeModState = nativeModState,
                 catalog = piExtensionCatalog,
                 isLoading = isLoadingPiExtensions,
                 catalogError = piExtensionCatalogError,
@@ -1022,7 +1029,10 @@ fun SettingsScreen(
                 onRefresh = onRefreshPiExtensions,
                 onUpdate = onUpdatePiExtensionPackage,
                 onRemove = onRemovePiExtension,
+                onSetEnabled = onSetPiExtensionEnabled,
                 onImport = onImportPiExtension,
+                onAllowNativeModsOnNextStart = onAllowNativeModsOnNextStart,
+                onDisableNativeModsOnNextStart = onDisableNativeModsOnNextStart,
                 onSelectPackage = { entry ->
                     selectedPiPackageSourceValue = entry.source
                     onLoadPiPackageDetails(entry)
@@ -1315,6 +1325,16 @@ private fun SettingsHub(
                     .navigationBarsPadding(),
             ) {
                 Spacer(Modifier.height(6.dp))
+                AetherExtensionSlot(AetherExtensionSlotSettingsHub)
+                if (
+                    LocalAetherExtensionUiController.current
+                        ?.snapshot
+                        ?.surfacesAt(AetherExtensionSlotSettingsHub)
+                        .orEmpty()
+                        .isNotEmpty()
+                ) {
+                    Spacer(Modifier.height(16.dp))
+                }
                 SettingsCardGroup {
                     SettingsNavRow(
                         icon = Icons.Rounded.AutoAwesome,
@@ -3277,8 +3297,116 @@ private fun AddSkillPage(
 }
 
 @Composable
+private fun NativeModStatusCard(
+    state: AetherNativeModState,
+    onAllowNativeModsOnNextStart: () -> Unit,
+    onDisableNativeModsOnNextStart: () -> Unit,
+) {
+    val safeMode = state.safeModeActive
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(
+                if (safeMode) {
+                    Color(0xFFFFB020).copy(alpha = 0.14f)
+                } else {
+                    AetherSurfaceHigh
+                }
+            )
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                imageVector = if (safeMode) {
+                    Icons.Rounded.WarningAmber
+                } else {
+                    Icons.Rounded.Code
+                },
+                contentDescription = null,
+                tint = if (safeMode) Color(0xFFFFB020) else AetherPrimary,
+                modifier = Modifier.size(22.dp),
+            )
+            Text(
+                text = stringResource(
+                    if (safeMode) {
+                        R.string.settings_native_mod_safe_mode_title
+                    } else {
+                        R.string.settings_native_mod_active_title
+                    }
+                ),
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = AetherOnSurface,
+            )
+        }
+        Text(
+            text = if (safeMode) {
+                stringResource(R.string.settings_native_mod_safe_mode_body)
+            } else {
+                stringResource(
+                    R.string.settings_native_mod_active_summary,
+                    state.loaded.size,
+                    state.discovered.size,
+                )
+            },
+            style = MaterialTheme.typography.bodyMedium,
+            color = AetherOnSurfaceVariant,
+        )
+        if (state.suspectedCrashModId.isNotBlank()) {
+            Text(
+                text = stringResource(
+                    R.string.settings_native_mod_suspected,
+                    state.suspectedCrashModId,
+                ),
+                style = MaterialTheme.typography.bodySmall,
+                color = AetherOnSurfaceVariant,
+            )
+        }
+        state.failures.take(4).forEach { failure ->
+            Text(
+                text = stringResource(
+                    R.string.settings_native_mod_failure,
+                    failure.id,
+                    failure.message,
+                ),
+                style = MaterialTheme.typography.bodySmall,
+                color = Color(0xFFFFB020),
+            )
+        }
+        if (state.restartRequired) {
+            Text(
+                text = stringResource(R.string.settings_native_mod_restart_required),
+                style = MaterialTheme.typography.bodySmall,
+                color = AetherOnSurface,
+                fontWeight = FontWeight.Medium,
+            )
+        }
+        Spacer(Modifier.height(2.dp))
+        if (safeMode) {
+            SettingsActionButton(
+                label = stringResource(R.string.settings_native_mod_enable_next_start),
+                onClick = onAllowNativeModsOnNextStart,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        } else {
+            SettingsSubtleActionButton(
+                label = stringResource(R.string.settings_native_mod_disable_next_start),
+                onClick = onDisableNativeModsOnNextStart,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+    }
+}
+
+@Composable
 private fun PiExtensionsPage(
     installedExtensions: List<InstalledPiExtension>,
+    nativeModState: AetherNativeModState,
     catalog: List<PiExtensionCatalogEntry>,
     isLoading: Boolean,
     catalogError: String,
@@ -3286,7 +3414,10 @@ private fun PiExtensionsPage(
     onRefresh: () -> Unit,
     onUpdate: (String) -> Unit,
     onRemove: (InstalledPiExtension) -> Unit,
+    onSetEnabled: (InstalledPiExtension, Boolean) -> Unit,
     onImport: () -> Unit,
+    onAllowNativeModsOnNextStart: () -> Unit,
+    onDisableNativeModsOnNextStart: () -> Unit,
     onSelectPackage: (PiExtensionCatalogEntry) -> Unit,
     onBack: () -> Unit,
 ) {
@@ -3329,6 +3460,20 @@ private fun PiExtensionsPage(
             color = AetherOnSurfaceVariant,
             modifier = Modifier.padding(horizontal = 4.dp),
         )
+
+        if (
+            nativeModState.safeModeActive ||
+            nativeModState.discovered.isNotEmpty() ||
+            nativeModState.loaded.isNotEmpty() ||
+            nativeModState.failures.isNotEmpty()
+        ) {
+            Spacer(Modifier.height(14.dp))
+            NativeModStatusCard(
+                state = nativeModState,
+                onAllowNativeModsOnNextStart = onAllowNativeModsOnNextStart,
+                onDisableNativeModsOnNextStart = onDisableNativeModsOnNextStart,
+            )
+        }
 
         Spacer(Modifier.height(16.dp))
 
@@ -3459,6 +3604,7 @@ private fun PiExtensionsPage(
                             actionsEnabled = operationSource.isBlank(),
                             onUpdate = { onUpdate(extension.source) },
                             onRemove = { onRemove(extension) },
+                            onSetEnabled = { enabled -> onSetEnabled(extension, enabled) },
                         )
                         Spacer(Modifier.height(10.dp))
                     }
@@ -3884,6 +4030,7 @@ private fun InstalledPiExtensionCard(
     actionsEnabled: Boolean,
     onUpdate: () -> Unit,
     onRemove: () -> Unit,
+    onSetEnabled: (Boolean) -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -3912,11 +4059,25 @@ private fun InstalledPiExtensionCard(
                     )
                 }
             }
-            if (isOperating) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(22.dp),
-                    strokeWidth = 2.dp,
-                    color = AetherPrimary,
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (isOperating) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(22.dp),
+                        strokeWidth = 2.dp,
+                        color = AetherPrimary,
+                    )
+                }
+                Switch(
+                    checked = extension.isEnabled,
+                    onCheckedChange = onSetEnabled,
+                    enabled = actionsEnabled && !isOperating,
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = AetherOnPrimary,
+                        checkedTrackColor = AetherPrimary,
+                    ),
                 )
             }
         }
@@ -3930,9 +4091,21 @@ private fun InstalledPiExtensionCard(
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        if (extension.kind == PiExtensionInstallKind.Package) {
+        run {
             val extensionLabel = if (extension.extensionCount > 0) {
                 stringResource(R.string.settings_package_extensions_count, extension.extensionCount)
+            } else null
+            val aetherExtensionLabel = if (extension.aetherExtensionCount > 0) {
+                stringResource(
+                    R.string.settings_package_aether_extensions_count,
+                    extension.aetherExtensionCount,
+                )
+            } else null
+            val nativeEntrypointLabel = if (extension.nativeEntrypointCount > 0) {
+                stringResource(
+                    R.string.settings_package_native_mods_count,
+                    extension.nativeEntrypointCount,
+                )
             } else null
             val skillLabel = if (extension.skillCount > 0) {
                 stringResource(R.string.settings_package_skills_count, extension.skillCount)
@@ -3943,7 +4116,14 @@ private fun InstalledPiExtensionCard(
             val themeLabel = if (extension.themeCount > 0) {
                 stringResource(R.string.settings_package_themes_count, extension.themeCount)
             } else null
-            val resources = listOfNotNull(extensionLabel, skillLabel, promptLabel, themeLabel)
+            val resources = listOfNotNull(
+                extensionLabel,
+                aetherExtensionLabel,
+                nativeEntrypointLabel,
+                skillLabel,
+                promptLabel,
+                themeLabel,
+            )
             if (resources.isNotEmpty()) {
                 Spacer(Modifier.height(8.dp))
                 Text(

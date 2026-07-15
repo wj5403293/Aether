@@ -1,0 +1,16 @@
+{
+  "name": "aether-combined-extension-example",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "aether": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}

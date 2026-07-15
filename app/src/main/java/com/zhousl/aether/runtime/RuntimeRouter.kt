@@ -42,11 +42,14 @@ class RuntimeRouter(
 
     fun runtimeWorkspaceDirectory(
         settings: AppSettings,
-        sharedTermuxWorkspace: String,
+        termuxWorkspaceDirectory: String,
+        environment: String? = null,
     ): String {
-        val runtime = runtimeFor(settings, null) ?: termuxRuntime
+        val runtime = runtimeFor(settings, environment)
+            ?: runtimeFor(settings, null)
+            ?: termuxRuntime
         return when (runtime.id) {
-            LocalRuntimeId.Termux -> sharedTermuxWorkspace
+            LocalRuntimeId.Termux -> termuxWorkspaceDirectory
             LocalRuntimeId.Alpine -> runtime.workspaceRoot
         }
     }

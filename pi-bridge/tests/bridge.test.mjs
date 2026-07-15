@@ -139,6 +139,147 @@ test("lists Pi extension packages from an isolated agent directory", async () =>
   }
 });
 
+test("loads Aether UI extensions, renders native trees, runs actions, and intercepts events", async () => {
+  const home = await mkdtemp(join(tmpdir(), "aether-app-extensions-"));
+  const extensionDirectory = join(home, ".aether", "extensions", "demo");
+  await mkdir(extensionDirectory, { recursive: true });
+  await writeFile(
+    join(extensionDirectory, "package.json"),
+    JSON.stringify({
+      name: "aether-demo",
+      version: "1.0.0",
+      aether: { extensions: ["./index.ts"] },
+    }),
+    "utf8",
+  );
+  await writeFile(
+    join(extensionDirectory, "index.ts"),
+    `
+import { defineAetherExtension, ui } from "@aether/extension-api";
+
+export default defineAetherExtension((aether) => {
+  aether.registerAction("increment", async () => {
+    const count = aether.storage.get("count", 0) + 1;
+    aether.storage.set("count", count);
+    await aether.host.invoke("app.notify", { message: "count=" + count });
+    return { count };
+  });
+  aether.registerSurface("chat.composer.top", {
+    id: "counter",
+    render: ({ storage, draft_input }) =>
+      ui.card([
+        ui.text("Count " + (storage.count ?? 0)),
+        ui.text("Draft " + (draft_input ?? "")),
+        ui.button("Increment", "increment"),
+      ]),
+  });
+  aether.registerComponent("chat.composer.actionTray", {
+    id: "tray-wrapper",
+    mode: "wrap",
+    render: () => ui.card([
+      ui.text("Wrapped tray"),
+      ui.core(),
+    ]),
+  });
+  aether.registerPage({
+    id: "demo",
+    title: "Demo",
+    icon: "code",
+    render: () => ui.text("Aether page"),
+  });
+  aether.registerAction("list-skills", async () =>
+    aether.services.invoke("skills", "list"));
+  aether.on("before_send", ({ text }) => ({ text: "[ext] " + text }));
+  aether.intercept("chat.new", ({ selected_skill_ids }) => ({
+    selected_skill_ids,
+    intercepted: true,
+  }));
+});
+`,
+    "utf8",
+  );
+
+  const client = new BridgeClient({ HOME: home, USERPROFILE: home });
+  try {
+    const loaded = await client.request("aether-load", "reload_aether_extensions", {
+      context: { draft_input: "hello" },
+    });
+    assert.equal(loaded.snapshot.extensions.length, 1);
+    assert.equal(loaded.snapshot.surfaces[0].slot, "chat.composer.top");
+    assert.equal(loaded.snapshot.surfaces[0].tree.children[0].text, "Count 0");
+    assert.equal(loaded.snapshot.components[0].target, "chat.composer.actionTray");
+    assert.equal(loaded.snapshot.components[0].mode, "wrap");
+    assert.equal(loaded.snapshot.components[0].tree.children[1].type, "core");
+    assert.equal(loaded.snapshot.pages[0].title, "Demo");
+    assert.deepEqual(loaded.snapshot.event_names, ["before_send", "operation:chat.new"]);
+
+    const disabled = await client.request("aether-disabled", "reload_aether_extensions", {
+      disabled_extension_paths: [extensionDirectory],
+      context: { draft_input: "hello" },
+    });
+    assert.deepEqual(disabled.snapshot.extensions, []);
+    assert.deepEqual(disabled.snapshot.surfaces, []);
+    assert.deepEqual(disabled.snapshot.pages, []);
+
+    await client.request("aether-reenabled", "reload_aether_extensions", {
+      disabled_extension_paths: [],
+      disabled_package_sources: [],
+      context: { draft_input: "hello" },
+    });
+
+    const actionPromise = client.request("aether-action", "invoke_aether_extension_action", {
+      extension_id: loaded.snapshot.extensions[0].id,
+      action: "increment",
+      args: {},
+      context: { draft_input: "hello" },
+    });
+    const hostCall = await client.waitForEvent(
+      (frame) => frame.id === "aether-action" && frame.event === "aether_host_call",
+    );
+    assert.equal(hostCall.payload.method, "app.notify");
+    await client.request("aether-host-result", "aether_host_result", {
+      call_id: hostCall.payload.call_id,
+      ok: true,
+      result: { notified: true },
+    });
+    const actionResult = await actionPromise;
+    assert.equal(actionResult.result.count, 1);
+    assert.equal(actionResult.snapshot.surfaces[0].tree.children[0].text, "Count 1");
+
+    const servicePromise = client.request("aether-service-action", "invoke_aether_extension_action", {
+      extension_id: loaded.snapshot.extensions[0].id,
+      action: "list-skills",
+      args: {},
+      context: {},
+    });
+    const serviceCall = await client.waitForEvent(
+      (frame) => frame.id === "aether-service-action" && frame.event === "aether_host_call",
+    );
+    assert.equal(serviceCall.payload.method, "service.invoke");
+    assert.equal(serviceCall.payload.args.service, "skills");
+    assert.equal(serviceCall.payload.args.method, "list");
+    await client.request("aether-service-host-result", "aether_host_result", {
+      call_id: serviceCall.payload.call_id,
+      ok: true,
+      result: { skills: [] },
+    });
+    const serviceResult = await servicePromise;
+    assert.deepEqual(serviceResult.result, { skills: [] });
+
+    const eventResult = await client.request("aether-event", "dispatch_aether_extension_event", {
+      event: "before_send",
+      data: { text: "ship it" },
+      context: {},
+    });
+    assert.equal(eventResult.handled, true);
+    assert.equal(eventResult.cancelled, false);
+    assert.equal(eventResult.payload.text, "[ext] ship it");
+  } finally {
+    await client.close();
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 function fauxConfig(overrides = {}) {
   return {
     provider_type: "faux",

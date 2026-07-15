@@ -59,6 +59,7 @@ Aether's UI and interactions are heavily inspired by excellent, mature applicati
 - **Pi Harness Kernel**: Powered by the Pi framework, providing the widest LLM provider compatibility and a lightweight, highly efficient Agent execution engine.
 - **Built-in Alpine VM**: Includes an automatically installed Alpine Linux environment to run shell commands and tools out of the box.
 - **Extensible Host Control**: Supports optional Shizuku and Termux integration for direct device manipulation and automation.
+- **Trusted-code Extensions**: One package can extend the Pi agent and inject native Compose/WebView UI or app logic into Aether. See [Aether App Extensions](docs/AETHER_EXTENSIONS.md).
 
 ## 🚀 Quick Start
 

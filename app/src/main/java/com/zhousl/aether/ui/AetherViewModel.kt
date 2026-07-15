@@ -11,6 +11,8 @@ import com.zhousl.aether.R
 import com.zhousl.aether.aetherRuntime
 import com.zhousl.aether.data.ActiveSkillContext
 import com.zhousl.aether.data.AetherAnalytics
+import com.zhousl.aether.data.AetherModOperationDecision
+import com.zhousl.aether.data.AetherModServiceMethod
 import com.zhousl.aether.data.AppUpdateManager
 import com.zhousl.aether.data.AutomaticModelPurpose
 import com.zhousl.aether.data.AgentModeAuthorizationMethod
@@ -123,6 +125,7 @@ class AetherViewModel(
     private val runtime = application.aetherRuntime
     private val diagnosticLogger = runtime.diagnosticLogger
     private val settingsRepository = runtime.settingsRepository
+    private val modKernel = runtime.modKernel
     private val chatStateStore = runtime.chatStateStore
     private val extensionsRepository = runtime.extensionsRepository
     private val sessionExecutionManager = runtime.sessionExecutionManager
@@ -133,6 +136,7 @@ class AetherViewModel(
     private val agentModeController = runtime.agentModeController
     private val skillManager = runtime.skillManager
     private val piExtensionManager = runtime.piExtensionManager
+    private val aetherAppExtensionManager = runtime.aetherAppExtensionManager
     private val scheduledTaskManager = runtime.scheduledTaskManager
     private val mcpClientManager = McpClientManager(
         runtimeRouter = runtime.runtimeRouter,
@@ -149,11 +153,13 @@ class AetherViewModel(
     private var didEvaluateWorkspaceMode = false
     private var selectSessionJob: Job? = null
     private var providerAuthJob: Job? = null
+    private var extensionSendHookJob: Job? = null
 
     val uiState: StateFlow<AetherUiState> = _uiState.asStateFlow()
     val transientMessages = _transientMessages.asSharedFlow()
 
     init {
+        registerCoreModServices()
         refreshTermuxSetup()
         refreshAlpineSetup()
         refreshRootSetup()
@@ -1149,14 +1155,51 @@ class AetherViewModel(
     }
 
     fun startNewChat() {
+        val snapshot = _uiState.value
+        val defaultSkillIds = enabledDefaultSkillIds(snapshot)
+        val operation = "chat.new"
+        if (
+            !modKernel.operations.hasInterceptors(operation) &&
+            "operation:$operation" !in aetherAppExtensionManager.state.value.snapshot.eventNames
+        ) {
+            startNewChatNow(defaultSkillIds)
+            return
+        }
+        viewModelScope.launch {
+            val result = dispatchAetherOperation(
+                operation = operation,
+                payload = JSONObject().put(
+                    "selected_skill_ids",
+                    JSONArray(defaultSkillIds),
+                ),
+            )
+            if (result.cancelled) return@launch
+            val selectedSkillIds = if (result.payload.has("selected_skill_ids")) {
+                result.payload.optJSONArray("selected_skill_ids").toStringList()
+            } else {
+                defaultSkillIds
+            }
+            withContext(Dispatchers.Main.immediate) {
+                startNewChatNow(selectedSkillIds)
+            }
+        }
+    }
+
+    private fun startNewChatNow(
+        selectedSkillIds: List<String>,
+    ) {
         _uiState.update {
+            val enabledSkillIds = it.installedSkills
+                .filter(InstalledSkill::isEnabled)
+                .map(InstalledSkill::id)
+                .toSet()
             it.copy(
                 currentScreen = AppScreen.Chat,
                 currentSessionId = DraftSessionId,
                 draftInput = "",
                 draftAttachments = emptyList(),
                 draftSelectedModelKey = resolveDefaultChatModelKey(it.settings, it.providerConfigs),
-                draftSelectedSkillIds = emptyList(),
+                draftSelectedSkillIds = selectedSkillIds.filter(enabledSkillIds::contains),
                 draftSelectedMcpServerIds = emptyList(),
                 draftAgentModeEnabled = false,
                 draftWorkspaceId = null,
@@ -2337,6 +2380,15 @@ class AetherViewModel(
         }
     }
 
+    fun setPiExtensionEnabled(
+        extension: InstalledPiExtension,
+        enabled: Boolean,
+    ) {
+        performPiExtensionOperation(extension.id) {
+            piExtensionManager.setEnabled(extension, enabled)
+        }
+    }
+
     fun importPiExtension(
         uri: Uri,
         onComplete: (Boolean) -> Unit = {},
@@ -2391,6 +2443,7 @@ class AetherViewModel(
     private suspend fun refreshPiExtensionState(loadCatalog: Boolean) {
         _uiState.update { it.copy(isLoadingPiExtensions = true) }
         val installedResult = piExtensionManager.listInstalled()
+        runtime.nativeModManager.refreshDiscovery()
         val catalogResult = if (loadCatalog) {
             piExtensionManager.fetchCatalog()
         } else {
@@ -2417,6 +2470,34 @@ class AetherViewModel(
     }
 
     fun setComposerSkillSelected(
+        skillId: String,
+        selected: Boolean,
+    ) {
+        val operation = "skills.selection"
+        if (
+            !modKernel.operations.hasInterceptors(operation) &&
+            "operation:$operation" !in aetherAppExtensionManager.state.value.snapshot.eventNames
+        ) {
+            setComposerSkillSelectedNow(skillId, selected)
+            return
+        }
+        viewModelScope.launch {
+            val result = dispatchAetherOperation(
+                operation = operation,
+                payload = JSONObject()
+                    .put("skill_id", skillId)
+                    .put("selected", selected),
+            )
+            if (result.cancelled) return@launch
+            val resolvedSkillId = result.payload.optString("skill_id", skillId)
+            val resolvedSelected = result.payload.optBoolean("selected", selected)
+            withContext(Dispatchers.Main.immediate) {
+                setComposerSkillSelectedNow(resolvedSkillId, resolvedSelected)
+            }
+        }
+    }
+
+    private fun setComposerSkillSelectedNow(
         skillId: String,
         selected: Boolean,
     ) {
@@ -2825,7 +2906,639 @@ class AetherViewModel(
         submitCurrentMessage(SessionFollowUpMode.Steer)
     }
 
+    private fun registerCoreModServices() {
+        modKernel.services.register(
+            id = "skills",
+            owner = "aether-core",
+            description = "Inspect and mutate installed skills, current selection, and new-chat defaults.",
+            priority = -10_000,
+            methods = listOf(
+                AetherModServiceMethod("list", "List installed skills and selection state."),
+                AetherModServiceMethod("getSelection", "Read current and default skill selections."),
+                AetherModServiceMethod("setSelection", "Replace current or default skill selections.", true),
+                AetherModServiceMethod("setSelected", "Toggle one skill in a selection scope.", true),
+            ),
+            handler = { method, args -> handleSkillsModService(method, args) },
+        )
+        modKernel.services.register(
+            id = "state",
+            owner = "aether-core",
+            description = "Read the public Aether state tree and apply supported state transactions.",
+            priority = -10_000,
+            methods = listOf(
+                AetherModServiceMethod("get", "Read a value from the public state tree."),
+                AetherModServiceMethod("transaction", "Apply an ordered list of state mutations.", true),
+            ),
+            handler = { method, args -> handleStateModService(method, args) },
+        )
+    }
+
+    private suspend fun dispatchAetherOperation(
+        operation: String,
+        payload: JSONObject,
+    ): AetherModOperationDecision {
+        val context = buildAetherExtensionHostState(_uiState.value)
+        val nativeDecision = if (modKernel.operations.hasInterceptors(operation)) {
+            modKernel.operations.intercept(
+                operation = operation,
+                payload = payload,
+                context = context,
+            )
+        } else {
+            AetherModOperationDecision(payload = payload)
+        }
+        if (nativeDecision.cancelled) return nativeDecision
+
+        val eventName = "operation:$operation"
+        if (eventName !in aetherAppExtensionManager.state.value.snapshot.eventNames) {
+            return nativeDecision
+        }
+        val scriptDecision = aetherAppExtensionManager.dispatchEvent(
+            event = eventName,
+            data = nativeDecision.payload,
+            context = context,
+        ).getOrNull() ?: return AetherModOperationDecision(
+            payload = nativeDecision.payload,
+            cancelled = true,
+            reason = "Aether script operation interceptor failed.",
+        )
+        return AetherModOperationDecision(
+            payload = scriptDecision.payload,
+            cancelled = scriptDecision.cancelled,
+            reason = scriptDecision.reason,
+        )
+    }
+
+    private suspend fun handleSkillsModService(
+        method: String,
+        args: JSONObject,
+    ): JSONObject = when (method) {
+        "list",
+        "getSelection" -> buildSkillsModState(_uiState.value)
+
+        "setSelection" -> {
+            val requestedIds = args.optJSONArray("ids").toStringList()
+            val scope = args.optString("scope", "current").lowercase()
+            val snapshot = _uiState.value
+            val enabledIds = snapshot.installedSkills
+                .filter(InstalledSkill::isEnabled)
+                .map(InstalledSkill::id)
+                .toSet()
+            val selectedIds = requestedIds.filter(enabledIds::contains).distinct()
+            if (scope in setOf("default", "global", "current_and_default", "both")) {
+                settingsRepository.updateDefaultSelectedSkillIds(selectedIds)
+            }
+            if (scope !in setOf("default", "global")) {
+                withContext(Dispatchers.Main.immediate) {
+                    setCurrentSkillSelectionNow(
+                        selectedSkillIds = selectedIds,
+                        sessionId = args.optString("session_id").ifBlank { null },
+                    )
+                }
+            }
+            buildSkillsModState(_uiState.value).put("updated", true)
+        }
+
+        "setSelected" -> {
+            val skillId = args.optString("skill_id").trim()
+            require(skillId.isNotBlank()) { "skill_id is required." }
+            val scope = args.optString("scope", "current").lowercase()
+            val selected = args.optBoolean("selected", true)
+            val snapshot = _uiState.value
+            if (scope in setOf("current_and_default", "both")) {
+                val currentIds = updateOrderedSelection(
+                    currentSelectedSkillIds(snapshot),
+                    skillId,
+                    selected,
+                )
+                val defaultIds = updateOrderedSelection(
+                    snapshot.settings.defaultSelectedSkillIds,
+                    skillId,
+                    selected,
+                )
+                handleSkillsModService(
+                    method = "setSelection",
+                    args = JSONObject()
+                        .put("ids", JSONArray(defaultIds))
+                        .put("scope", "default"),
+                )
+                handleSkillsModService(
+                    method = "setSelection",
+                    args = JSONObject()
+                        .put("ids", JSONArray(currentIds))
+                        .put("scope", "current")
+                        .put("session_id", args.optString("session_id")),
+                )
+            } else {
+                val currentIds = if (scope in setOf("default", "global")) {
+                    snapshot.settings.defaultSelectedSkillIds
+                } else {
+                    currentSelectedSkillIds(snapshot)
+                }
+                val updatedIds = updateOrderedSelection(currentIds, skillId, selected)
+                handleSkillsModService(
+                    method = "setSelection",
+                    args = JSONObject()
+                        .put("ids", JSONArray(updatedIds))
+                        .put("scope", scope)
+                        .put("session_id", args.optString("session_id")),
+                )
+            }
+        }
+
+        else -> error("Unknown skills service method: $method")
+    }
+
+    private suspend fun handleStateModService(
+        method: String,
+        args: JSONObject,
+    ): JSONObject = when (method) {
+        "get" -> {
+            val path = args.optString("path").trim()
+            val state = buildAetherExtensionHostState(_uiState.value)
+            JSONObject()
+                .put("path", path)
+                .put("value", jsonValueAtPath(state, path))
+        }
+
+        "transaction" -> {
+            val operations = args.optJSONArray("operations") ?: JSONArray()
+            for (index in 0 until operations.length()) {
+                val operation = operations.optJSONObject(index) ?: continue
+                applyModStateOperation(operation)
+            }
+            JSONObject()
+                .put("applied", operations.length())
+                .put("state", buildAetherExtensionHostState(_uiState.value))
+        }
+
+        else -> error("Unknown state service method: $method")
+    }
+
+    private suspend fun applyModStateOperation(
+        operation: JSONObject,
+    ) {
+        val op = operation.optString("op", "set").lowercase()
+        val path = normalizeModStatePath(operation.optString("path"))
+        val value = if (op == "remove") JSONObject.NULL else operation.opt("value")
+        when (path) {
+            "draft_input" -> withContext(Dispatchers.Main.immediate) {
+                updateDraftInput(if (value == JSONObject.NULL) "" else value?.toString().orEmpty())
+            }
+
+            "selected_skill_ids" -> withContext(Dispatchers.Main.immediate) {
+                setCurrentSkillSelectionNow(
+                    selectedSkillIds = (value as? JSONArray).toStringList(),
+                )
+            }
+
+            "default_skill_ids" -> {
+                val enabledIds = _uiState.value.installedSkills
+                    .filter(InstalledSkill::isEnabled)
+                    .map(InstalledSkill::id)
+                    .toSet()
+                settingsRepository.updateDefaultSelectedSkillIds(
+                    (value as? JSONArray).toStringList().filter(enabledIds::contains)
+                )
+            }
+
+            "agent_mode_enabled" -> withContext(Dispatchers.Main.immediate) {
+                setComposerAgentModeSelected(value != JSONObject.NULL && value == true)
+            }
+
+            "selected_model_key" -> {
+                val modelKey = if (value == JSONObject.NULL) "" else value?.toString().orEmpty()
+                require(modelKey.isNotBlank()) { "selected_model_key cannot be empty." }
+                withContext(Dispatchers.Main.immediate) {
+                    setCurrentChatModelSelectionAndResolveThinkingLevels(modelKey) {}
+                }
+            }
+
+            "screen" -> withContext(Dispatchers.Main.immediate) {
+                when (value?.toString()?.lowercase()) {
+                    "settings" -> openSettings()
+                    "chat" -> closeSettings()
+                    else -> error("Unsupported screen state value: $value")
+                }
+            }
+
+            else -> error("Unsupported public Aether state path: ${operation.optString("path")}")
+        }
+    }
+
+    suspend fun handleAetherExtensionHostCall(
+        method: String,
+        args: JSONObject,
+    ): JSONObject = when (method) {
+        "kernel.listServices" -> modKernel.services.listJson()
+
+        "kernel.describeService" -> modKernel.services.describeJson(
+            args.optString("service")
+        )
+
+        "service.invoke" -> modKernel.services.invoke(
+            id = args.optString("service"),
+            method = args.optString("method"),
+            args = args.optJSONObject("args") ?: JSONObject(),
+        )
+
+        "state.get" -> handleStateModService("get", args)
+
+        "state.transaction" -> handleStateModService("transaction", args)
+
+        "app.getState" -> buildAetherExtensionHostState(_uiState.value)
+
+        "app.setDraftInput" -> {
+            withContext(Dispatchers.Main.immediate) {
+                updateDraftInput(args.optString("text"))
+            }
+            JSONObject().put("updated", true)
+        }
+
+        "app.appendDraftInput" -> {
+            withContext(Dispatchers.Main.immediate) {
+                val current = _uiState.value.draftInput
+                updateDraftInput(current + args.optString("text"))
+            }
+            JSONObject().put("updated", true)
+        }
+
+        "app.sendMessage" -> {
+            withContext(Dispatchers.Main.immediate) {
+                if (args.has("text")) {
+                    updateDraftInput(args.optString("text"))
+                }
+                when (args.optString("mode").lowercase()) {
+                    "steer" -> steerCurrentMessage()
+                    "queue" -> queueCurrentMessage()
+                    else -> sendCurrentMessage()
+                }
+            }
+            JSONObject().put("submitted", true)
+        }
+
+        "app.newChat" -> {
+            withContext(Dispatchers.Main.immediate) {
+                startNewChat()
+            }
+            JSONObject().put("opened", "chat")
+        }
+
+        "app.selectSession" -> {
+            val sessionId = args.optString("session_id").trim()
+            require(sessionId.isNotBlank()) { "session_id is required." }
+            withContext(Dispatchers.Main.immediate) {
+                selectSession(sessionId)
+            }
+            JSONObject().put("selected", sessionId)
+        }
+
+        "app.openScreen" -> {
+            val screen = args.optString("screen").lowercase()
+            withContext(Dispatchers.Main.immediate) {
+                when (screen) {
+                    "settings" -> openSettings()
+                    "chat" -> closeSettings()
+                    else -> error("Unknown Aether screen: $screen")
+                }
+            }
+            JSONObject().put("opened", screen)
+        }
+
+        "app.pauseGeneration" -> {
+            withContext(Dispatchers.Main.immediate) {
+                pauseGeneration()
+            }
+            JSONObject().put("paused", true)
+        }
+
+        "app.setReasoningEffort" -> {
+            val effort = normalizeReasoningEffort(args.optString("effort"))
+            withContext(Dispatchers.Main.immediate) {
+                setReasoningEffort(effort)
+            }
+            JSONObject().put("reasoning_effort", effort)
+        }
+
+        "app.setAgentMode" -> {
+            val enabled = args.optBoolean("enabled")
+            withContext(Dispatchers.Main.immediate) {
+                setComposerAgentModeSelected(enabled)
+            }
+            JSONObject().put("enabled", enabled)
+        }
+
+        "app.setModel" -> {
+            val modelKey = args.optString("model_key").trim()
+            require(modelKey.isNotBlank()) { "model_key is required." }
+            withContext(Dispatchers.Main.immediate) {
+                setCurrentChatModelSelectionAndResolveThinkingLevels(modelKey) {}
+            }
+            JSONObject().put("model_key", modelKey)
+        }
+
+        "app.notify" -> {
+            emitTransientMessage(UiText.Raw(args.optString("message")))
+            JSONObject().put("notified", true)
+        }
+
+        "settings.get" -> JSONObject()
+            .put("settings", _uiState.value.settings.toJson())
+            .put(
+                "provider_configs",
+                JSONArray(serializeProviderConfigs(_uiState.value.providerConfigs)),
+            )
+
+        "settings.patch" -> {
+            val current = _uiState.value.settings
+            var updated = current
+            if (args.has("system_prompt")) {
+                updated = updated.copy(systemPrompt = args.optString("system_prompt"))
+            }
+            if (args.has("reasoning_effort")) {
+                updated = updated.copy(
+                    reasoningEffort = normalizeReasoningEffort(args.optString("reasoning_effort"))
+                )
+            }
+            if (args.has("keep_tasks_running_in_background")) {
+                updated = updated.copy(
+                    keepTasksRunningInBackground = args.optBoolean("keep_tasks_running_in_background")
+                )
+            }
+            if (args.has("notify_on_task_completion")) {
+                updated = updated.copy(
+                    notifyOnTaskCompletion = args.optBoolean("notify_on_task_completion")
+                )
+            }
+            if (args.has("theme")) {
+                updated = updated.copy(themeMode = AppThemeMode.fromStorage(args.optString("theme")))
+            }
+            if (args.has("language")) {
+                updated = updated.copy(
+                    language = AppLanguage.fromStorage(args.optString("language"), updated.language)
+                )
+            }
+            if (args.has("workspace_mode")) {
+                updated = updated.copy(
+                    agentWorkspaceMode = AgentWorkspaceMode.fromStorage(args.optString("workspace_mode"))
+                )
+            }
+            if (args.has("default_skill_ids")) {
+                val enabledIds = _uiState.value.installedSkills
+                    .filter(InstalledSkill::isEnabled)
+                    .map(InstalledSkill::id)
+                    .toSet()
+                updated = updated.copy(
+                    defaultSelectedSkillIds = args.optJSONArray("default_skill_ids")
+                        .toStringList()
+                        .filter(enabledIds::contains),
+                )
+            }
+            if (args.has("tavily_api_key")) {
+                updated = updated.copy(tavilyApiKey = args.optString("tavily_api_key"))
+            }
+            if (args.has("tavily_base_url")) {
+                updated = updated.copy(
+                    tavilyBaseUrl = normalizeTavilyBaseUrl(args.optString("tavily_base_url"))
+                )
+            }
+            settingsRepository.updateSettings(updated)
+            JSONObject().put("settings", updated.toJson())
+        }
+
+        "runtime.execute" -> {
+            val settings = _uiState.value.settings
+            val environment = args.optString("environment").ifBlank { null }
+            val selectedRuntime = runtime.runtimeRouter.runtimeFor(settings, environment)
+                ?: error("No configured runtime matched ${environment ?: "the default runtime"}.")
+            val command = args.optString("command")
+            require(command.isNotBlank()) { "command is required." }
+            val output = selectedRuntime.executeCommand(
+                command = command,
+                workingDirectory = args.optString("working_directory")
+                    .ifBlank { selectedRuntime.homeDirectory },
+                awaitTimeoutMillis = args.optLong("timeout_ms", 60_000L)
+                    .coerceIn(1_000L, 10 * 60_000L),
+            )
+            JSONObject()
+                .put("runtime", selectedRuntime.id.storageValue)
+                .put("output", output)
+        }
+
+        else -> error("Unsupported Aether extension host method: $method")
+    }
+
+    private fun currentSelectedSkillIds(
+        snapshot: AetherUiState,
+    ): List<String> =
+        snapshot.sessions
+            .firstOrNull { it.id == snapshot.currentSessionId }
+            ?.selectedSkillIds
+            ?: snapshot.draftSelectedSkillIds
+
+    private fun enabledDefaultSkillIds(
+        snapshot: AetherUiState,
+    ): List<String> {
+        val enabledIds = snapshot.installedSkills
+            .filter(InstalledSkill::isEnabled)
+            .map(InstalledSkill::id)
+            .toSet()
+        return snapshot.settings.defaultSelectedSkillIds.filter(enabledIds::contains)
+    }
+
+    private fun setCurrentSkillSelectionNow(
+        selectedSkillIds: List<String>,
+        sessionId: String? = null,
+    ) {
+        val enabledIds = _uiState.value.installedSkills
+            .filter(InstalledSkill::isEnabled)
+            .map(InstalledSkill::id)
+            .toSet()
+        val normalizedIds = selectedSkillIds.filter(enabledIds::contains).distinct()
+        val targetSessionId = sessionId ?: _uiState.value.currentSessionId
+        if (targetSessionId == DraftSessionId) {
+            _uiState.update { current ->
+                current.copy(draftSelectedSkillIds = normalizedIds)
+            }
+        } else {
+            setSessionSelectedSkillIds(targetSessionId, normalizedIds)
+        }
+    }
+
+    private fun buildSkillsModState(
+        snapshot: AetherUiState,
+    ): JSONObject {
+        val selectedIds = currentSelectedSkillIds(snapshot)
+        return JSONObject().apply {
+            put("session_id", snapshot.currentSessionId)
+            put("selected_skill_ids", JSONArray(selectedIds))
+            put("default_skill_ids", JSONArray(snapshot.settings.defaultSelectedSkillIds))
+            put(
+                "skills",
+                JSONArray().apply {
+                    snapshot.installedSkills.forEach { skill ->
+                        put(
+                            JSONObject().apply {
+                                put("id", skill.id)
+                                put("name", skill.name)
+                                put("description", skill.description)
+                                put("action_label", skill.actionLabel)
+                                put("license", skill.license)
+                                put("compatibility", skill.compatibility)
+                                put("allowed_tools", JSONArray(skill.allowedTools))
+                                put("enabled", skill.isEnabled)
+                                put("selected", skill.id in selectedIds)
+                                put(
+                                    "default_selected",
+                                    skill.id in snapshot.settings.defaultSelectedSkillIds,
+                                )
+                            }
+                        )
+                    }
+                },
+            )
+        }
+    }
+
+    private fun normalizeModStatePath(
+        rawPath: String,
+    ): String = when (
+        rawPath.trim().trim('/').replace('/', '.').lowercase()
+    ) {
+        "draft_input",
+        "chat.draftinput",
+        "chat.draft_input" -> "draft_input"
+
+        "selected_skill_ids",
+        "chat.selectedskillids",
+        "chat.selected_skill_ids" -> "selected_skill_ids"
+
+        "default_skill_ids",
+        "chat.defaultskillids",
+        "chat.default_skill_ids" -> "default_skill_ids"
+
+        "agent_mode_enabled",
+        "chat.agentmodeenabled",
+        "chat.agent_mode_enabled" -> "agent_mode_enabled"
+
+        "selected_model_key",
+        "chat.selectedmodelkey",
+        "chat.selected_model_key" -> "selected_model_key"
+
+        "screen",
+        "app.screen" -> "screen"
+
+        else -> rawPath.trim()
+    }
+
+    private fun jsonValueAtPath(
+        root: Any?,
+        rawPath: String,
+    ): Any? {
+        val path = rawPath.trim().trim('/').replace('/', '.')
+        if (path.isBlank()) return root
+        var current: Any? = root
+        path.split('.').filter(String::isNotBlank).forEach { segment ->
+            current = when (val value = current) {
+                is JSONObject -> value.opt(segment)
+                is JSONArray -> segment.toIntOrNull()?.let(value::opt)
+                else -> JSONObject.NULL
+            }
+        }
+        return current ?: JSONObject.NULL
+    }
+
+    private fun buildAetherExtensionHostState(
+        snapshot: AetherUiState,
+    ): JSONObject {
+        val activeSession = snapshot.sessions.firstOrNull { it.id == snapshot.currentSessionId }
+        val execution = snapshot.sessionExecutionStates[snapshot.currentSessionId]
+        val selectedSkillIds = currentSelectedSkillIds(snapshot)
+        return JSONObject().apply {
+            put("screen", snapshot.currentScreen.name.lowercase())
+            put("session_id", snapshot.currentSessionId)
+            put("draft_input", snapshot.draftInput)
+            put("is_running", execution?.isRunning == true)
+            put("is_editing", snapshot.editingMessageId != null)
+            put("selected_model_key", activeSession?.selectedModelKey ?: snapshot.draftSelectedModelKey)
+            put("agent_mode_enabled", activeSession?.agentModeEnabled ?: snapshot.draftAgentModeEnabled)
+            put("selected_skill_ids", JSONArray(selectedSkillIds))
+            put("default_skill_ids", JSONArray(snapshot.settings.defaultSelectedSkillIds))
+            put("skills", buildSkillsModState(snapshot).optJSONArray("skills"))
+            put("settings", snapshot.settings.toJson())
+            put("provider_configs", JSONArray(serializeProviderConfigs(snapshot.providerConfigs)))
+            put("sessions", JSONArray(serializeChatSessions(snapshot.sessions)))
+            put(
+                "installed_extensions",
+                JSONArray().apply {
+                    snapshot.installedPiExtensions.forEach { extension ->
+                        put(
+                            JSONObject().apply {
+                                put("id", extension.id)
+                                put("name", extension.name)
+                                put("source", extension.source)
+                                put("pi_extension_count", extension.extensionCount)
+                                put("aether_extension_count", extension.aetherExtensionCount)
+                                put("native_entrypoint_count", extension.nativeEntrypointCount)
+                            }
+                        )
+                    }
+                },
+            )
+        }
+    }
+
     private fun submitCurrentMessage(
+        runningFollowUpMode: SessionFollowUpMode,
+    ) {
+        val snapshot = _uiState.value
+        if ("before_send" !in aetherAppExtensionManager.state.value.snapshot.eventNames) {
+            submitCurrentMessageNow(runningFollowUpMode)
+            return
+        }
+        if (extensionSendHookJob?.isActive == true) return
+        extensionSendHookJob = viewModelScope.launch {
+            val eventData = JSONObject().apply {
+                put("text", snapshot.draftInput)
+                put("mode", runningFollowUpMode.name.lowercase())
+                put("session_id", snapshot.currentSessionId)
+                put(
+                    "attachments",
+                    JSONArray().apply {
+                        snapshot.draftAttachments.forEach { attachment ->
+                            put(
+                                JSONObject().apply {
+                                    put("id", attachment.id)
+                                    put("name", attachment.name)
+                                    put("mime_type", attachment.mimeType)
+                                    put("workspace_path", attachment.workspacePath)
+                                }
+                            )
+                        }
+                    },
+                )
+            }
+            val eventResult = aetherAppExtensionManager.dispatchEvent(
+                event = "before_send",
+                data = eventData,
+                context = buildAetherExtensionHostState(snapshot),
+            ).getOrNull()
+            if (eventResult?.cancelled == true) {
+                eventResult.reason.takeIf(String::isNotBlank)?.let { reason ->
+                    emitTransientMessage(UiText.Raw(reason))
+                }
+                return@launch
+            }
+            val transformedText = eventResult?.payload?.optString("text", snapshot.draftInput)
+                ?: snapshot.draftInput
+            if (transformedText != _uiState.value.draftInput) {
+                _uiState.update { current -> current.copy(draftInput = transformedText) }
+            }
+            submitCurrentMessageNow(runningFollowUpMode)
+        }
+    }
+
+    private fun submitCurrentMessageNow(
         runningFollowUpMode: SessionFollowUpMode,
     ) {
         val snapshot = _uiState.value
@@ -2887,6 +3600,15 @@ class AetherViewModel(
                     showStarterPromptHint = false,
                 )
             }
+            aetherAppExtensionManager.emitEvent(
+                event = "message_sent",
+                data = JSONObject()
+                    .put("session_id", targetSessionId)
+                    .put("message_id", userMessage.id)
+                    .put("text", userMessage.text)
+                    .put("mode", runningFollowUpMode.name.lowercase()),
+                context = buildAetherExtensionHostState(_uiState.value),
+            )
             return
         }
 
@@ -3028,6 +3750,15 @@ class AetherViewModel(
             )
         }
         sessionExecutionManager.startTurn(turnRequest)
+        aetherAppExtensionManager.emitEvent(
+            event = "message_sent",
+            data = JSONObject()
+                .put("session_id", targetSessionId)
+                .put("message_id", userMessage.id)
+                .put("text", userMessage.text)
+                .put("mode", "new_turn"),
+            context = buildAetherExtensionHostState(_uiState.value),
+        )
     }
 
     private fun handleTurnEvent(
@@ -3061,6 +3792,13 @@ class AetherViewModel(
             }
             current.copy(unviewedCompletedSessionIds = unviewedCompletedSessionIds)
         }
+        aetherAppExtensionManager.emitEvent(
+            event = "turn_complete",
+            data = JSONObject()
+                .put("session_id", event.sessionId)
+                .put("outcome", event.outcome.name.lowercase()),
+            context = buildAetherExtensionHostState(_uiState.value),
+        )
     }
 
     private suspend fun buildPendingDraftAttachment(
@@ -3828,10 +4566,19 @@ class AetherViewModel(
         selectedSkillIds: List<String>,
     ) {
         updateSession(sessionId) { session ->
-            if (session.selectedSkillIds == selectedSkillIds) {
+            val activeSkills = session.activeSkills.filter { activeSkill ->
+                selectedSkillIds.contains(activeSkill.skillId)
+            }
+            if (
+                session.selectedSkillIds == selectedSkillIds &&
+                session.activeSkills == activeSkills
+            ) {
                 null
             } else {
-                session.copy(selectedSkillIds = selectedSkillIds)
+                session.copy(
+                    selectedSkillIds = selectedSkillIds,
+                    activeSkills = activeSkills,
+                )
             }
         }
     }
@@ -4872,6 +5619,7 @@ class AetherViewModel(
         put("defaultTitleModelKey", defaultTitleModelKey)
         put("defaultNamingModelKey", defaultNamingModelKey)
         put("defaultCompactingModelKey", defaultCompactingModelKey)
+        put("defaultSelectedSkillIds", JSONArray(defaultSelectedSkillIds))
         put("onboardingSeenVersion", onboardingSeenVersion)
         put("onboardingCompletedVersion", onboardingCompletedVersion)
         put("privacyPolicyAccepted", privacyPolicyAccepted)
@@ -4985,6 +5733,7 @@ class AetherViewModel(
                 "defaultCompactingModelKey",
                 defaults.defaultCompactingModelKey,
             ),
+            defaultSelectedSkillIds = json.optJSONArray("defaultSelectedSkillIds").toStringList(),
             onboardingSeenVersion = json.optInt("onboardingSeenVersion", defaults.onboardingSeenVersion),
             onboardingCompletedVersion = json.optInt(
                 "onboardingCompletedVersion",
@@ -5143,4 +5892,13 @@ private fun AppSettings.withRuntimeEnabled(
         enabledRuntimeIds = enabled,
         defaultRuntimeId = if (makeDefault) runtimeId else defaultRuntimeId,
     )
+}
+
+private fun JSONArray?.toStringList(): List<String> {
+    if (this == null) return emptyList()
+    return buildList {
+        for (index in 0 until length()) {
+            optString(index).trim().takeIf(String::isNotBlank)?.let(::add)
+        }
+    }.distinct()
 }

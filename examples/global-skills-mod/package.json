@@ -1,0 +1,10 @@
+{
+  "name": "aether-global-skills-mod",
+  "version": "1.0.0",
+  "description": "Minecraft-style replacement of Aether's native skill tray with persistent global defaults.",
+  "aether": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}

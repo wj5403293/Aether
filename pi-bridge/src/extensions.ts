@@ -25,6 +25,10 @@ import * as typebox from "typebox";
 import * as typeboxCompile from "typebox/compile";
 import * as typeboxValue from "typebox/value";
 import { loadExtensionFromFactory } from "../node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js";
+import {
+  aetherAppExtensionCountForManifest,
+  aetherExtensionApiModule,
+} from "./aether-extensions.js";
 
 const EXTENSION_FILE_PATTERN = /\.(?:[cm]?[jt]s)$/i;
 const INDEX_FILE_NAMES = [
@@ -56,6 +60,8 @@ const virtualModules: Record<string, unknown> = {
   "@mariozechner/pi-ai/oauth": piAiOauth,
   "@mariozechner/pi-coding-agent": piCodingAgent,
   "@mariozechner/pi-tui": piTui,
+  "@aether/extension-api": aetherExtensionApiModule,
+  "@aether/android-extension": aetherExtensionApiModule,
 };
 
 export interface AetherExtensionLoadError {
@@ -72,6 +78,11 @@ export interface AetherExtensionRuntime {
   errors: AetherExtensionLoadError[];
 }
 
+export interface AetherExtensionLoadOptions {
+  disabledExtensionPaths?: string[];
+  disabledPackageSources?: string[];
+}
+
 export interface AetherInstalledExtensionPackage {
   source: string;
   scope: "user" | "project";
@@ -81,6 +92,7 @@ export interface AetherInstalledExtensionPackage {
   version: string;
   description: string;
   extensionCount: number;
+  aetherExtensionCount: number;
   skillCount: number;
   promptCount: number;
   themeCount: number;
@@ -102,6 +114,21 @@ function readJsonFile(filePath: string): Record<string, unknown> | undefined {
   }
 }
 
+function isPathDisabled(
+  candidatePath: string,
+  disabledPaths: Set<string>,
+): boolean {
+  const candidate = path.resolve(candidatePath);
+  return [...disabledPaths].some((disabledPath) => {
+    const relative = path.relative(disabledPath, candidate);
+    return relative === "" || (
+      !relative.startsWith(`..${path.sep}`) &&
+      relative !== ".." &&
+      !path.isAbsolute(relative)
+    );
+  });
+}
+
 function packageExtensionPaths(directory: string): string[] {
   const manifest = readJsonFile(path.join(directory, "package.json"));
   const pi = manifest?.pi;
@@ -114,6 +141,7 @@ function packageExtensionPaths(directory: string): string[] {
       if (paths.length > 0) return paths;
     }
   }
+  if (aetherAppExtensionCountForManifest(manifest) > 0) return [];
   for (const name of INDEX_FILE_NAMES) {
     const candidate = path.join(directory, name);
     if (fs.existsSync(candidate)) return [candidate];
@@ -176,10 +204,14 @@ function createPackageManager(cwd: string): DefaultPackageManager {
   });
 }
 
-async function discoverPackageExtensionPaths(cwd: string): Promise<string[]> {
+async function discoverPackageExtensionPaths(
+  cwd: string,
+  disabledPackageSources: Set<string> = new Set(),
+): Promise<string[]> {
   const resolved = await createPackageManager(cwd).resolve();
   return resolved.extensions
     .filter((entry) => entry.enabled)
+    .filter((entry) => !disabledPackageSources.has(entry.metadata.source))
     .map((entry) => path.resolve(entry.path));
 }
 
@@ -238,6 +270,7 @@ function installedPackagePayload(
     version: typeof manifest?.version === "string" ? manifest.version : "",
     description: typeof manifest?.description === "string" ? manifest.description : "",
     extensionCount: resources.extensions.length || manifestExtensionCount(manifest),
+    aetherExtensionCount: aetherAppExtensionCountForManifest(manifest),
     skillCount: resources.skills.length,
     promptCount: resources.prompts.length,
     themeCount: resources.themes.length,
@@ -308,10 +341,16 @@ async function loadFactory(extensionPath: string): Promise<ExtensionFactory> {
 export async function loadAetherExtensions(
   cwd: string,
   configuredPaths: string[] = [],
+  loadOptions: AetherExtensionLoadOptions = {},
 ): Promise<AetherExtensionRuntime> {
+  const disabledExtensionPaths = new Set(
+    (loadOptions.disabledExtensionPaths ?? []).map((entry) => path.resolve(entry)),
+  );
+  const disabledPackageSources = new Set(loadOptions.disabledPackageSources ?? []);
   const paths = [
-    ...discoverAetherExtensionPaths(cwd, configuredPaths),
-    ...(await discoverPackageExtensionPaths(cwd)),
+    ...discoverAetherExtensionPaths(cwd, configuredPaths)
+      .filter((entry) => !isPathDisabled(entry, disabledExtensionPaths)),
+    ...(await discoverPackageExtensionPaths(cwd, disabledPackageSources)),
   ].filter((entry, index, entries) => entries.indexOf(entry) === index);
   const runtime = createExtensionRuntime();
   const eventBus = createEventBus();

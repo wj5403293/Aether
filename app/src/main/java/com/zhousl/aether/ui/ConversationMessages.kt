@@ -2284,12 +2284,8 @@ private fun ReasoningTimelineToolRow(
     isLast: Boolean,
     onOpenLink: (String) -> Unit,
 ) {
-    val context = LocalContext.current
     val arguments = remember(toolInvocation.argumentsJson) { parseJsonObject(toolInvocation.argumentsJson) }
     val output = remember(toolInvocation.outputJson) { parseJsonObject(toolInvocation.outputJson) }
-    val title = remember(context, toolInvocation.toolName, toolInvocation.isRunning, toolInvocation.argumentsJson) {
-        formatToolInvocationTitleLabel(context, toolInvocation, arguments = arguments)
-    }
     val webSourceMetadata = remember(toolInvocation.toolName, toolInvocation.argumentsJson, toolInvocation.outputJson) {
         webSourceMetadata(toolInvocation.toolName, arguments, output)
     }
@@ -2310,19 +2306,10 @@ private fun ReasoningTimelineToolRow(
                 .padding(bottom = if (isLast) 0.dp else 18.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            if (toolInvocation.isRunning) {
-                ShimmerStatusText(
-                    text = title,
-                    travelDurationMillis = 3200,
-                    pauseDurationMillis = 1000,
-                )
-            } else {
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = AetherOnSurface,
-                )
-            }
+            ToolInvocationCard(
+                toolInvocation = toolInvocation,
+                topPadding = 0.dp,
+            )
             webSourceMetadata?.let { metadata ->
                 WebSourcePill(
                     metadata = metadata,

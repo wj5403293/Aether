@@ -1,5 +1,9 @@
 package com.zhousl.aether.data
 
+import com.zhousl.aether.runtime.LocalRuntime
+import com.zhousl.aether.runtime.LocalRuntimeIssue
+import com.zhousl.aether.runtime.LocalRuntimeSetupState
+import com.zhousl.aether.runtime.RuntimeRouter
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -117,7 +121,198 @@ class AetherToolExecutorTest {
         assertFalse(AetherToolExecutor.inferToolOutputOk("""{"err":true}"""))
         assertTrue(AetherToolExecutor.inferToolOutputOk("plain text"))
     }
+
+    @Test
+    fun defaultWorkingDirectoryFollowsExplicitRuntime() {
+        val runtimeRouter = RuntimeRouter(
+            termuxRuntime = ToolExecutorFakeRuntime(
+                id = LocalRuntimeId.Termux,
+                workspaceRoot = "/termux-default-workspace",
+            ),
+            alpineRuntime = ToolExecutorFakeRuntime(
+                id = LocalRuntimeId.Alpine,
+                workspaceRoot = "/workspace",
+            ),
+        )
+        val settings = AppSettings(
+            enabledRuntimeIds = setOf(LocalRuntimeId.Termux, LocalRuntimeId.Alpine),
+            defaultRuntimeId = LocalRuntimeId.Alpine,
+            termuxSetupCompleted = true,
+            alpineSetupCompleted = true,
+        )
+        val termuxArguments = JSONObject(
+            injectDefaultWorkingDirectory(
+                argumentsJson = """{"environment":"termux","command":"pwd"}""",
+                settings = settings,
+                runtimeRouter = runtimeRouter,
+                workspaceDirectory = "/workspace",
+                termuxWorkspaceDirectory = "/data/data/com.termux/files/home/.aether/workspaces/session-1",
+            ),
+        )
+        val alpineArguments = JSONObject(
+            injectDefaultWorkingDirectory(
+                argumentsJson = """{"environment":"alpine","command":"pwd"}""",
+                settings = settings.copy(defaultRuntimeId = LocalRuntimeId.Termux),
+                runtimeRouter = runtimeRouter,
+                workspaceDirectory = "/data/data/com.termux/files/home/.aether/workspaces/session-1",
+                termuxWorkspaceDirectory = "/data/data/com.termux/files/home/.aether/workspaces/session-1",
+            ),
+        )
+
+        assertEquals(
+            "/data/data/com.termux/files/home/.aether/workspaces/session-1",
+            termuxArguments.getString("working_directory"),
+        )
+        assertEquals("/workspace", alpineArguments.getString("working_directory"))
+    }
+
+    @Test
+    fun explicitWorkingDirectoryStillWinsAcrossRuntimeSwitches() {
+        val runtimeRouter = RuntimeRouter(
+            termuxRuntime = ToolExecutorFakeRuntime(LocalRuntimeId.Termux, "/termux-workspace"),
+            alpineRuntime = ToolExecutorFakeRuntime(LocalRuntimeId.Alpine, "/workspace"),
+        )
+
+        val arguments = JSONObject(
+            injectDefaultWorkingDirectory(
+                argumentsJson = """{"environment":"termux","command":"pwd","workingDirectory":"~"}""",
+                settings = AppSettings(
+                    enabledRuntimeIds = setOf(LocalRuntimeId.Termux, LocalRuntimeId.Alpine),
+                    defaultRuntimeId = LocalRuntimeId.Alpine,
+                ),
+                runtimeRouter = runtimeRouter,
+                workspaceDirectory = "/workspace",
+                termuxWorkspaceDirectory = "/termux-workspace",
+            ),
+        )
+
+        assertEquals("~", arguments.getString("working_directory"))
+        assertFalse(arguments.has("workingDirectory"))
+    }
+
+    @Test
+    fun workspaceFileRoutingRecognizesAlpineAndTermuxRoots() {
+        assertEquals(
+            LocalRuntimeId.Alpine,
+            resolveWorkspaceRuntimeId(
+                path = "/workspace/agent-mode/capture.png",
+                workingDirectory = "",
+                defaultRuntimeId = LocalRuntimeId.Termux,
+            ),
+        )
+        assertEquals(
+            LocalRuntimeId.Termux,
+            resolveWorkspaceRuntimeId(
+                path = "/data/data/com.termux/files/home/.aether/workspace/uploads/image.png",
+                workingDirectory = "",
+                defaultRuntimeId = LocalRuntimeId.Alpine,
+            ),
+        )
+        assertEquals(
+            LocalRuntimeId.Alpine,
+            resolveWorkspaceRuntimeId(
+                path = "relative.png",
+                workingDirectory = "/workspace",
+                defaultRuntimeId = LocalRuntimeId.Termux,
+            ),
+        )
+        assertEquals(
+            LocalRuntimeId.Termux,
+            resolveWorkspaceRuntimeId(
+                path = "/data/data/com.termux/files/home/.aether/workspace/output.png",
+                workingDirectory = "/workspace",
+                defaultRuntimeId = LocalRuntimeId.Alpine,
+            ),
+        )
+        assertEquals(
+            LocalRuntimeId.Alpine,
+            resolveWorkspaceRuntimeId(
+                path = "file:///workspace/agent-mode/capture.png",
+                workingDirectory = "/data/data/com.termux/files/home/.aether/workspace",
+                defaultRuntimeId = LocalRuntimeId.Termux,
+            ),
+        )
+    }
+
+    @Test
+    fun stdioMcpWorkspaceFollowsItsConfiguredRuntime() {
+        val runtimeRouter = RuntimeRouter(
+            termuxRuntime = ToolExecutorFakeRuntime(LocalRuntimeId.Termux, "/termux-workspace"),
+            alpineRuntime = ToolExecutorFakeRuntime(LocalRuntimeId.Alpine, "/workspace"),
+        )
+        val settings = AppSettings(
+            enabledRuntimeIds = setOf(LocalRuntimeId.Termux, LocalRuntimeId.Alpine),
+            defaultRuntimeId = LocalRuntimeId.Alpine,
+        )
+        val termuxServer = McpServerConfig(
+            id = "termux-server",
+            displayName = "Termux server",
+            transport = McpTransportConfig.StdIo(
+                command = "server",
+                runtimeEnvironment = LocalRuntimeId.Termux,
+            ),
+        )
+        val alpineServer = McpServerConfig(
+            id = "alpine-server",
+            displayName = "Alpine server",
+            transport = McpTransportConfig.StdIo(
+                command = "server",
+                runtimeEnvironment = LocalRuntimeId.Alpine,
+            ),
+        )
+
+        assertEquals(
+            "/data/data/com.termux/files/home/.aether/workspaces/session-1",
+            resolveMcpWorkspaceDirectory(
+                server = termuxServer,
+                settings = settings,
+                runtimeRouter = runtimeRouter,
+                workspaceDirectory = "/workspace",
+                termuxWorkspaceDirectory = "/data/data/com.termux/files/home/.aether/workspaces/session-1",
+            ),
+        )
+        assertEquals(
+            "/workspace",
+            resolveMcpWorkspaceDirectory(
+                server = alpineServer,
+                settings = settings.copy(defaultRuntimeId = LocalRuntimeId.Termux),
+                runtimeRouter = runtimeRouter,
+                workspaceDirectory = "/data/data/com.termux/files/home/.aether/workspaces/session-1",
+                termuxWorkspaceDirectory = "/data/data/com.termux/files/home/.aether/workspaces/session-1",
+            ),
+        )
+    }
 }
 
 private fun org.json.JSONArray.toStringList(): List<String> =
     (0 until length()).map(::getString)
+
+private class ToolExecutorFakeRuntime(
+    override val id: LocalRuntimeId,
+    override val workspaceRoot: String,
+) : LocalRuntime {
+    override val displayName: String = id.displayName
+    override val homeDirectory: String = "/home"
+    override val managedCommandsDirectory: String = "/runs"
+
+    override suspend fun inspectSetup(): LocalRuntimeSetupState =
+        LocalRuntimeSetupState(id, LocalRuntimeIssue.Ready)
+
+    override suspend fun execute(
+        argumentsJson: String,
+        onProgress: (suspend (String) -> Unit)?,
+    ): String = """{"ok":true}"""
+
+    override suspend fun fetchExecution(argumentsJson: String): String = """{"ok":true}"""
+
+    override suspend fun killExecution(argumentsJson: String): String = """{"ok":true}"""
+
+    override suspend fun killExecutionByRunId(runId: String, tailBytes: Int): String =
+        """{"ok":true}"""
+
+    override suspend fun executeCommand(
+        command: String,
+        workingDirectory: String,
+        awaitTimeoutMillis: Long,
+    ): String = """{"ok":true}"""
+}
