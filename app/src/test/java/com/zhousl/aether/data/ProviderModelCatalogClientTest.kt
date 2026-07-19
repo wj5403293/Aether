@@ -107,6 +107,44 @@ class ProviderModelCatalogClientTest {
     }
 
     @Test
+    fun builtInOpenAiApiKeyUsesLiveModelsEndpoint() {
+        val definition = PiProviderCatalog.resolve("openai")
+        val config = LlmProviderConfig(
+            providerId = "openai",
+            name = "OpenAI",
+            piProviderId = "openai",
+            apiKey = "test-key",
+            baseUrl = definition.defaultBaseUrl,
+            modelId = "",
+            authMethod = ProviderAuthMethod.ApiKey,
+        )
+
+        assertEquals(
+            true,
+            ProviderModelCatalogClient.shouldFetchModelsFromEndpoint(config, definition),
+        )
+    }
+
+    @Test
+    fun openAiCodexOAuthKeepsProviderCatalog() {
+        val definition = PiProviderCatalog.resolve("openai-codex")
+        val config = LlmProviderConfig(
+            providerId = "openai-codex",
+            name = "OpenAI Codex",
+            piProviderId = "openai-codex",
+            apiKey = "",
+            baseUrl = definition.defaultBaseUrl,
+            modelId = "",
+            authMethod = ProviderAuthMethod.OAuth,
+        )
+
+        assertEquals(
+            false,
+            ProviderModelCatalogClient.shouldFetchModelsFromEndpoint(config, definition),
+        )
+    }
+
+    @Test
     fun customOpenAiBaseUrlFetchesModelsFromConfiguredEndpoint() = runBlocking {
         val server = MockWebServer()
         server.enqueue(
@@ -131,6 +169,36 @@ class ProviderModelCatalogClientTest {
             assertEquals(null, result.error)
             assertEquals(listOf("third-party-model"), result.models)
             assertEquals("/v1/models", server.takeRequest().path)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun failedLiveRequestDoesNotReturnBundledModels() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(401)
+                .setBody("""{"error":{"message":"invalid key"}}""")
+        )
+        server.start()
+
+        try {
+            val result = ProviderModelCatalogClient.fetchModels(
+                LlmProviderConfig(
+                    providerId = "openai",
+                    name = "OpenAI",
+                    piProviderId = "openai",
+                    apiKey = "invalid-key",
+                    baseUrl = server.url("/v1").toString(),
+                    modelId = "",
+                    authMethod = ProviderAuthMethod.ApiKey,
+                )
+            )
+
+            assertEquals(emptyList<String>(), result.models)
+            assertEquals("""{"error":{"message":"invalid key"}}""", result.error)
         } finally {
             server.shutdown()
         }

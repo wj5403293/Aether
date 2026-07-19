@@ -88,6 +88,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -696,6 +697,13 @@ private fun ProviderSetupStep(
     }
     var isFinishing by rememberSaveable(stepIndex, replayMode) { mutableStateOf(false) }
     var providerSearch by rememberSaveable(stepIndex, replayMode) { mutableStateOf("") }
+    var customModelValue by rememberSaveable(
+        stepIndex,
+        replayMode,
+        stateSaver = TextFieldValue.Saver,
+    ) {
+        mutableStateOf(TextFieldValue())
+    }
     val selectedAuthMethod = ProviderAuthMethod.valueOf(selectedAuthMethodName)
     val definition = formState.selectedDefinition
     val isLoadingModels = formState.isFetchingModelsLocally || isFetchingModels
@@ -875,11 +883,17 @@ private fun ProviderSetupStep(
                                         piProviderId = definition.id,
                                         cachedModels = models,
                                     )
-                                    formState.cachedModels = ordered
+                                    formState.cachedModels = models
+                                        .map(String::trim)
+                                        .filter(String::isNotBlank)
+                                        .distinctBy { it.lowercase() }
                                     formState.enabledModelIds = ordered
                                     if (ordered.isNotEmpty()) {
                                         formState.modelId = ordered.first()
+                                    } else {
+                                        formState.modelId = ""
                                     }
+                                    customModelValue = TextFieldValue()
                                     formState.isFetchingModelsLocally = false
                                     stage = ProviderTourStage.Model
                                 }
@@ -909,6 +923,7 @@ private fun ProviderSetupStep(
                                     selected = formState.modelId.trim().equals(model, ignoreCase = true),
                                     onClick = {
                                         formState.modelId = model
+                                        customModelValue = TextFieldValue()
                                         formState.enabledModelIds = (listOf(model) + formState.enabledModelIds)
                                             .map(String::trim)
                                             .filter(String::isNotEmpty)
@@ -917,21 +932,15 @@ private fun ProviderSetupStep(
                                 )
                             }
                         }
-                        MinimalInputField(
+                        MinimalTextFieldValueInput(
                             label = stringResource(R.string.onboarding_model),
-                            value = if (formState.cachedModels.any {
-                                    it.equals(formState.modelId.trim(), ignoreCase = true)
-                                }
-                            ) {
-                                ""
-                            } else {
-                                formState.modelId
-                            },
+                            value = customModelValue,
                             placeholder = stringResource(R.string.onboarding_or_type_your_own_model),
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
                             onValueChange = { value ->
-                                formState.modelId = value
-                                val trimmed = value.trim()
+                                customModelValue = value
+                                formState.modelId = value.text
+                                val trimmed = value.text.trim()
                                 if (trimmed.isNotEmpty()) {
                                     formState.enabledModelIds = (listOf(trimmed) + formState.enabledModelIds)
                                         .map(String::trim)
@@ -2195,6 +2204,52 @@ private fun MinimalInputField(
     }
 }
 
+@Composable
+private fun MinimalTextFieldValueInput(
+    label: String,
+    value: TextFieldValue,
+    placeholder: String,
+    keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
+    onValueChange: (TextFieldValue) -> Unit,
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelLarge,
+            color = TourTextSecondary,
+        )
+        BasicTextField(
+            value = value,
+            onValueChange = onValueChange,
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(14.dp))
+                .background(TourSurface)
+                .padding(horizontal = 14.dp, vertical = 12.dp)
+                .tourBringIntoViewOnFocus(),
+            textStyle = MaterialTheme.typography.bodyLarge.copy(color = TourTextPrimary),
+            cursorBrush = SolidColor(TourTextPrimary),
+            singleLine = true,
+            keyboardOptions = keyboardOptions,
+            decorationBox = { innerTextField ->
+                Box(modifier = Modifier.fillMaxWidth()) {
+                    if (value.text.isBlank()) {
+                        Text(
+                            text = placeholder,
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = TourTextTertiary,
+                        )
+                    }
+                    innerTextField()
+                }
+            },
+        )
+    }
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 private fun Modifier.tourBringIntoViewOnFocus(): Modifier = composed {
     val requester = remember { BringIntoViewRequester() }
@@ -2325,43 +2380,15 @@ private fun messageRevealDuration(message: String): Long {
     return total.coerceIn(MessageMinDurationMillis, MessageMaxDurationMillis)
 }
 
-private fun prioritizedModelOptions(
+internal fun prioritizedModelOptions(
     piProviderId: String?,
     cachedModels: List<String>,
 ): List<String> {
-    val fallback = when (piProviderId) {
-        "openai",
-        "openai-codex" -> listOf(
-            "gpt-5.5",
-            "gpt-5.4",
-            "gpt-5.4-mini",
-        )
-
-        "anthropic" -> listOf(
-            "claude-opus-4-5",
-            "claude-sonnet-4-5",
-            "claude-haiku-4-5",
-        )
-
-        "google",
-        "google-vertex" -> listOf(
-            "gemini-2.5-flash",
-            "gemini-2.5-pro",
-            "gemini-2.0-flash",
-        )
-
-        else -> listOf(
-            "gpt-5.5",
-            "gpt-5.4",
-            "claude-4.6-sonnet",
-            "gemini-3-flash",
-            "gemini-3.1-pro",
-        )
-    }
-    val orderedModels = (cachedModels + fallback)
+    val fetchedModels = cachedModels
         .map(String::trim)
         .filter(String::isNotBlank)
         .distinctBy { it.lowercase() }
+    val orderedModels = fetchedModels
         .sortedWith(
             compareBy<String> { preferredModelRank(it) }
                 .thenBy { providerModelRank(piProviderId, it) }
@@ -2371,13 +2398,16 @@ private fun prioritizedModelOptions(
 }
 
 private fun preferredModelRank(model: String): Int {
-    val normalized = model.lowercase()
+    val normalized = model
+        .trim()
+        .lowercase()
+        .replace(Regex("[^a-z0-9]+"), "-")
+        .trim('-')
     return when {
-        normalized.contains("gpt-5.5") -> 0
-        normalized.contains("gpt-5.4") -> 1
-        normalized.contains("gemini-3-flash") || normalized.contains("gemini 3 flash") -> 2
-        normalized.contains("gemini-3.1-pro") || normalized.contains("gemini 3.1 pro") -> 3
-        normalized.contains("claude-4.6-sonnet") || normalized.contains("claude 4.6 sonnet") -> 4
+        normalized.contains("gpt-5-6") -> 0
+        normalized.contains("claude") &&
+            (normalized.contains("fable") || normalized.contains("opus")) -> 1
+        normalized.contains("gemini-3-") || normalized.endsWith("gemini-3") -> 2
         else -> 10
     }
 }
@@ -2402,6 +2432,7 @@ private fun List<String>.withAutomaticChatModelFirst(
     val automaticModel = options.findModelOption(
         options.resolveAutomaticModelKey(AutomaticModelPurpose.Chat)
     )?.modelId ?: return this
+    if (preferredModelRank(automaticModel) > preferredModelRank(first())) return this
     return (listOf(automaticModel) + filterNot { it.equals(automaticModel, ignoreCase = true) })
         .distinctBy { it.lowercase() }
 }

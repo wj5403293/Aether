@@ -41,7 +41,7 @@ object ProviderModelCatalogClient {
             val definition = PiProviderCatalog.resolve(
                 config.piProviderId,
             )
-            if (definition.isBuiltIn && !config.usesCustomOpenAiCompatibleBaseUrl()) {
+            if (!shouldFetchModelsFromEndpoint(config, definition)) {
                 return@withContext fetchPiBuiltinModels(
                     definition = definition,
                     piKernelBridge = piKernelBridge,
@@ -116,15 +116,21 @@ object ProviderModelCatalogClient {
         return FetchModelsResult(emptyList(), "Provider ${definition.id} is unavailable.")
     }
 
-    private fun LlmProviderConfig.usesCustomOpenAiCompatibleBaseUrl(): Boolean {
-        val normalizedBaseUrl = baseUrl.trim().trimEnd('/')
-        return piProviderId == "openai" &&
+    internal fun shouldFetchModelsFromEndpoint(
+        config: LlmProviderConfig,
+        definition: PiProviderDefinition = PiProviderCatalog.resolve(config.piProviderId),
+    ): Boolean {
+        if (!definition.isBuiltIn) return true
+        if (definition.id == "openai" && config.authMethod == ProviderAuthMethod.ApiKey) return true
+
+        val normalizedBaseUrl = config.baseUrl.trim().trimEnd('/')
+        return definition.id == "openai" &&
             normalizedBaseUrl.isNotBlank() &&
-            normalizedBaseUrl != PiProviderCatalog.resolve("openai").defaultBaseUrl
+            normalizedBaseUrl != definition.defaultBaseUrl
     }
 
     private fun fetchOpenAiModels(config: LlmProviderConfig): FetchModelsResult {
-        val baseUrl = config.baseUrl.trimEnd('/')
+        val baseUrl = config.baseUrl.trim().trimEnd('/')
         val modelsUrl = when {
             baseUrl.endsWith("/responses") -> baseUrl.replace("/responses", "/models")
             baseUrl.endsWith("/chat/completions") -> baseUrl.replace("/chat/completions", "/models")
@@ -155,12 +161,12 @@ object ProviderModelCatalogClient {
                         }
                     }
                 }
-                // Sort models: prefer chat/gpt models first
-                models.sortWith(compareBy(
-                    { if (it.contains("gpt") || it.contains("chat")) 0 else 1 },
-                    { it }
-                ))
-                FetchModelsResult(models)
+                FetchModelsResult(
+                    models
+                        .map(String::trim)
+                        .filter(String::isNotBlank)
+                        .distinctBy { it.lowercase() },
+                )
             } else {
                 val errorText = connection.errorStream?.bufferedReader()?.readText() ?: "HTTP ${connection.responseCode}"
                 FetchModelsResult(emptyList(), errorText)
