@@ -39,6 +39,7 @@ import com.zhousl.aether.data.McpServerConfig
 import com.zhousl.aether.data.McpServerTestOperation
 import com.zhousl.aether.data.normalizeSelectableModelKey
 import com.zhousl.aether.data.normalizeLlmInactivityReconnectTimeoutSeconds
+import com.zhousl.aether.data.normalizeLlmUserAgent
 import com.zhousl.aether.data.normalizeOldCommandHistoryRetentionHours
 import com.zhousl.aether.data.normalizeTavilyBaseUrl
 import com.zhousl.aether.data.OnboardingStarterPrompt
@@ -2016,6 +2017,7 @@ class AetherViewModel(
                         selectedModelSettings.providerEnvironmentVariables,
                     baseUrl = selectedModelSettings.baseUrl,
                     modelId = selectedModelSettings.modelId,
+                    userAgent = selectedModelSettings.userAgent,
                     customHeaders = selectedModelSettings.customHeaders,
                     systemPrompt = systemPrompt,
                     tavilyApiKey = tavilyApiKey.trim(),
@@ -4677,9 +4679,13 @@ class AetherViewModel(
             baseUrl = config.baseUrl.trim(),
             modelId = normalizedModelId,
             manualModelIds = manualModels,
+            userAgent = normalizeLlmUserAgent(config.userAgent),
             customHeaders = config.customHeaders
                 .map { header -> header.copy(name = header.name.trim()) }
-                .filter { header -> header.name.isNotBlank() }
+                .filter { header ->
+                    header.name.isNotBlank() &&
+                        !header.name.equals("User-Agent", ignoreCase = true)
+                }
                 .distinctBy { header -> header.name.lowercase() },
             providerEnvironmentVariables = config.providerEnvironmentVariables
                 .map { variable -> variable.copy(name = variable.name.trim()) }
@@ -5772,6 +5778,7 @@ class AetherViewModel(
         )
         put("baseUrl", baseUrl)
         put("modelId", modelId)
+        put("userAgent", normalizeLlmUserAgent(userAgent))
         put("customHeaders", customHeaders.toJsonArray())
         put("reasoningEffort", reasoningEffort)
         put("systemPrompt", systemPrompt)
@@ -5859,6 +5866,7 @@ class AetherViewModel(
                 ),
             baseUrl = importedBaseUrl,
             modelId = json.optString("modelId", defaults.modelId),
+            userAgent = normalizeLlmUserAgent(json.optString("userAgent", defaults.userAgent)),
             customHeaders = parseCustomHeaders(json.optJSONArray("customHeaders")),
             reasoningEffort = normalizeReasoningEffort(
                 json.optString("reasoningEffort", defaults.reasoningEffort),

@@ -120,6 +120,7 @@ data class AppSettings(
     val providerEnvironmentVariables: List<PiProviderEnvironmentVariable> = emptyList(),
     val baseUrl: String = DefaultCustomProviderBaseUrl,
     val modelId: String = DefaultCustomModelId,
+    val userAgent: String = AetherLlmUserAgent,
     val customHeaders: List<LlmCustomHeader> = emptyList(),
     val reasoningEffort: String = DefaultReasoningEffort,
     val systemPrompt: String = "You are Aether, a local-first Android agent that can call tools and complete tasks on-device. Use available tools instead of guessing local state.",
@@ -276,6 +277,7 @@ data class LlmProviderConfig(
     val providerEnvironmentVariables: List<PiProviderEnvironmentVariable> = emptyList(),
     val modelId: String,
     val manualModelIds: List<String> = listOf(modelId).filter(String::isNotBlank),
+    val userAgent: String = AetherLlmUserAgent,
     val customHeaders: List<LlmCustomHeader> = emptyList(),
     val cachedModels: List<String> = emptyList(),
     val enabledModelIds: List<String> = cachedModels + manualModelIds,
@@ -306,6 +308,7 @@ internal fun LlmProviderConfig.toJson(): JSONObject = JSONObject().apply {
     )
     put("baseUrl", baseUrl)
     put("modelId", modelId)
+    put("userAgent", normalizeLlmUserAgent(userAgent))
     put("manualModelIds", JSONArray().apply { manualModelIds.forEach(::put) })
     put("customHeaders", customHeaders.toJsonArray())
     put("cachedModels", JSONArray().apply { cachedModels.forEach(::put) })
@@ -351,6 +354,16 @@ internal fun parseProviderConfigs(rawValue: String): List<LlmProviderConfig> {
                     }
                 )
                 val availableModels = normalizeStringList(cachedModels + manualModelIds)
+                val parsedCustomHeaders = parseCustomHeaders(json.optJSONArray("customHeaders"))
+                val userAgent = if (json.has("userAgent")) {
+                    normalizeLlmUserAgent(json.optString("userAgent"))
+                } else {
+                    normalizeLlmUserAgent(
+                        parsedCustomHeaders.firstOrNull {
+                            it.name.equals("User-Agent", ignoreCase = true)
+                        }?.value
+                    )
+                }
                 val inferredProviderId = providerName
                     .sanitizeProviderId()
                     .ifBlank { "${providerDefinition.id.sanitizeProviderId()}_${index + 1}" }
@@ -372,7 +385,10 @@ internal fun parseProviderConfigs(rawValue: String): List<LlmProviderConfig> {
                         baseUrl = baseUrl,
                         modelId = modelId,
                         manualModelIds = manualModelIds,
-                        customHeaders = parseCustomHeaders(json.optJSONArray("customHeaders")),
+                        userAgent = userAgent,
+                        customHeaders = parsedCustomHeaders.filterNot {
+                            it.name.equals("User-Agent", ignoreCase = true)
+                        },
                         cachedModels = cachedModels,
                         enabledModelIds = if (json.has("enabledModelIds")) {
                             normalizeStringList(enabledModelIds.filter(availableModels::contains))
@@ -495,6 +511,7 @@ data class ProviderModelOption(
     val providerEnvironmentVariables: List<PiProviderEnvironmentVariable>,
     val baseUrl: String,
     val modelId: String,
+    val userAgent: String,
     val customHeaders: List<LlmCustomHeader>,
     val fullLabel: String,
     val chatLabel: String,
@@ -546,6 +563,7 @@ fun List<LlmProviderConfig>.availableModelOptions(
                 providerEnvironmentVariables = config.providerEnvironmentVariables,
                 baseUrl = config.baseUrl.trim(),
                 modelId = normalizedModelId,
+                userAgent = normalizeLlmUserAgent(config.userAgent),
                 customHeaders = config.customHeaders,
                 fullLabel = fullLabel,
                 chatLabel = if ((modelCounts[normalizedModelId] ?: 0) > 1) fullLabel else normalizedModelId,
@@ -570,6 +588,7 @@ fun AppSettings.withModelOption(option: ProviderModelOption): AppSettings = copy
     providerEnvironmentVariables = option.providerEnvironmentVariables,
     baseUrl = option.baseUrl.trim(),
     modelId = option.modelId.trim(),
+    userAgent = normalizeLlmUserAgent(option.userAgent),
     customHeaders = option.customHeaders,
 )
 

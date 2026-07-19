@@ -54,7 +54,7 @@ class ProviderModelCatalogClientTest {
     }
 
     @Test
-    fun fetchModelsIncludesAetherUserAgentAndCustomHeaders() = runBlocking {
+    fun fetchModelsIncludesConfiguredUserAgentAndCustomHeaders() = runBlocking {
         val server = MockWebServer()
         server.enqueue(
             MockResponse()
@@ -72,13 +72,17 @@ class ProviderModelCatalogClientTest {
                     apiKey = "test-key",
                     baseUrl = server.url("/v1").toString(),
                     modelId = "gpt-test",
-                    customHeaders = listOf(LlmCustomHeader("X-Aether-Test", "models")),
+                    userAgent = "CatalogClient/1.0",
+                    customHeaders = listOf(
+                        LlmCustomHeader("X-Aether-Test", "models"),
+                        LlmCustomHeader("User-Agent", "ignored"),
+                    ),
                 )
             )
 
             assertEquals(listOf("gpt-test"), result.models)
             val request = server.takeRequest()
-            assertEquals(AetherLlmUserAgent, request.getHeader("User-Agent"))
+            assertEquals("CatalogClient/1.0", request.getHeader("User-Agent"))
             assertEquals("models", request.getHeader("X-Aether-Test"))
         } finally {
             server.shutdown()

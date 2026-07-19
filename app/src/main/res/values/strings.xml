@@ -508,6 +508,7 @@
     <string name="provider_form_api_key">API Key</string>
     <string name="provider_form_base_url">Base URL</string>
     <string name="provider_form_manual_model_ids">Manual model IDs</string>
+    <string name="provider_form_user_agent">User-Agent</string>
     <string name="provider_form_model_picker_api_key_hint">Enabled models appear in the chat model picker. Configure API key authentication before refreshing the catalog.</string>
     <string name="provider_form_model_picker_refresh_hint">Enabled models appear in the chat model picker. Refresh loads models from the provider API.</string>
     <string name="provider_form_choose_provider">Choose provider</string>
