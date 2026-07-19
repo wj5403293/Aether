@@ -343,7 +343,7 @@
     <string name="settings_treat_termux_as_ready">将 Termux 视为已就绪</string>
     <string name="settings_termux_ready_toggle_subtitle">开启 = 已就绪。关闭 = 未就绪。</string>
     <string name="settings_replay_follow_up_tour">重播后续引导</string>
-    <string name="settings_replay_follow_up_tour_description">从路线选择开始，然后依次经过本地配置、Tavily、技能和 MCP。</string>
+    <string name="settings_replay_follow_up_tour_description">从路线选择开始，然后依次经过本地配置和 Tavily。</string>
     <string name="settings_replay_second_part">重播第二部分</string>
     <string name="settings_update_downloading_percent">正在下载 %1$d%%</string>
     <string name="settings_update_downloading">正在下载更新</string>
@@ -633,23 +633,6 @@
     <string name="onboarding_or_type_your_own_model">或者输入你自己的模型</string>
     <string name="onboarding_welcome_title">欢迎使用 Aether</string>
     <string name="onboarding_welcome_subtitle">在设备上运行、可与一切协作的智能体。</string>
-    <string name="onboarding_skills_message">之后你可以添加技能，让 Aether 记住你喜欢的可复用工作流。</string>
-    <string name="onboarding_skills_title">技能</string>
-    <string name="onboarding_skills_not_needed">现在不需要也没关系。</string>
-    <string name="onboarding_skills_installed_count">已经安装了 %1$d 个技能。</string>
-    <string name="onboarding_skills_line_two">它们可以用来放提示词、检查项和模板。</string>
-    <string name="onboarding_skill_chip_prompts">提示词</string>
-    <string name="onboarding_skill_chip_checks">检查项</string>
-    <string name="onboarding_skill_chip_templates">模板</string>
-    <string name="onboarding_mcp_title">MCP</string>
-    <string name="onboarding_mcp_message">如果之后你想接入实时文档、搜索或 API，可以在设置里连接 MCP 服务器。</string>
-    <string name="onboarding_mcp_later">这一步也可以留到以后。</string>
-    <string name="onboarding_mcp_available_count">已经有 %1$d 个 MCP 服务器可用。</string>
-    <string name="onboarding_mcp_line_two">这里是 Aether 超出本地工具能力的入口。</string>
-    <string name="onboarding_chip_docs">文档</string>
-    <string name="onboarding_chip_search">搜索</string>
-    <string name="onboarding_chip_apis">APIs</string>
-    <string name="onboarding_open_settings">打开设置</string>
     <string name="onboarding_provider_auth_message">首先，选择你已有的认证方式。</string>
     <string name="onboarding_provider_pick_message">现在选择一个支持该认证方式的提供方。</string>
     <string name="onboarding_provider_search_placeholder">搜索提供方</string>

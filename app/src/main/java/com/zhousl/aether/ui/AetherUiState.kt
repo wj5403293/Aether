@@ -37,8 +37,6 @@ enum class OnboardingStep {
     AlpineSetup,
     AgentModeAuthorization,
     TavilySetup,
-    SkillsOverview,
-    McpOverview,
 }
 
 enum class RootSetupProgressReturnPage {

@@ -701,8 +701,6 @@ private fun AetherAppContent(
                         rootSetupState = uiState.rootSetupState,
                         agentModeAuthorizationMethod = uiState.settings.agentModeAuthorizationMethod,
                         tavilyApiKey = uiState.settings.tavilyApiKey,
-                        installedSkillCount = uiState.installedSkills.size,
-                        mcpServerCount = uiState.mcpServers.size,
                         onFetchModels = viewModel::fetchModels,
                         onStartProviderLogin = viewModel::startProviderLogin,
                         onSubmitProviderAuthPrompt = viewModel::submitProviderAuthPrompt,
@@ -748,7 +746,6 @@ private fun AetherAppContent(
                             }
                         },
                         onCompleteFollowUp = viewModel::completeFollowUpOnboarding,
-                        onExploreSettings = viewModel::exploreSettingsFromOnboardingTour,
                     )
 
                     AppScreen.Chat -> AetherExtensionComponentHost(

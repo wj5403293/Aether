@@ -344,7 +344,7 @@
     <string name="settings_treat_termux_as_ready">Treat Termux as ready</string>
     <string name="settings_termux_ready_toggle_subtitle">On = ready. Off = not ready.</string>
     <string name="settings_replay_follow_up_tour">Replay Follow-up Tour</string>
-    <string name="settings_replay_follow_up_tour_description">Starts from route choice, then goes through local setup, Tavily, Skills, and MCP.</string>
+    <string name="settings_replay_follow_up_tour_description">Starts from route choice, then goes through local setup and Tavily.</string>
     <string name="settings_replay_second_part">Replay second part</string>
     <string name="settings_update_downloading_percent">Downloading %1$d%%</string>
     <string name="settings_update_downloading">Downloading update</string>
@@ -635,23 +635,6 @@
     <string name="onboarding_or_type_your_own_model">Or type your own model</string>
     <string name="onboarding_welcome_title">Welcome to Aether</string>
     <string name="onboarding_welcome_subtitle">The on-device agent that works with everything.</string>
-    <string name="onboarding_skills_message">Later, you can add Skills so Aether remembers reusable workflows you like.</string>
-    <string name="onboarding_skills_title">Skills</string>
-    <string name="onboarding_skills_not_needed">You do not need this now.</string>
-    <string name="onboarding_skills_installed_count">%1$d Skills are already installed.</string>
-    <string name="onboarding_skills_line_two">Use them for prompts, checks, and templates.</string>
-    <string name="onboarding_skill_chip_prompts">Prompts</string>
-    <string name="onboarding_skill_chip_checks">Checks</string>
-    <string name="onboarding_skill_chip_templates">Templates</string>
-    <string name="onboarding_mcp_title">MCP</string>
-    <string name="onboarding_mcp_message">If you want live docs, search, or APIs later, you can connect MCP servers in Settings.</string>
-    <string name="onboarding_mcp_later">You can leave this for later.</string>
-    <string name="onboarding_mcp_available_count">%1$d MCP servers are already available.</string>
-    <string name="onboarding_mcp_line_two">This is where Aether grows beyond local tools.</string>
-    <string name="onboarding_chip_docs">Docs</string>
-    <string name="onboarding_chip_search">Search</string>
-    <string name="onboarding_chip_apis">APIs</string>
-    <string name="onboarding_open_settings">Open settings</string>
     <string name="onboarding_provider_auth_message">First, choose how you want to connect.</string>
     <string name="onboarding_provider_pick_message">Now choose a provider that supports that authentication method.</string>
     <string name="onboarding_provider_search_placeholder">Search providers</string>

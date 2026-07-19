@@ -15,7 +15,6 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -46,7 +45,6 @@ import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Cloud
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Code
-import androidx.compose.material.icons.rounded.Extension
 import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.SmartToy
 import androidx.compose.material.icons.rounded.Search
@@ -147,8 +145,6 @@ private val FollowUpOnboardingSteps = listOf(
     OnboardingStep.TermuxSetup,
     OnboardingStep.AgentModeAuthorization,
     OnboardingStep.TavilySetup,
-    OnboardingStep.SkillsOverview,
-    OnboardingStep.McpOverview,
 )
 
 private val TourBackground: Color
@@ -195,8 +191,6 @@ fun OnboardingScreen(
     rootSetupState: RootSetupState,
     agentModeAuthorizationMethod: AgentModeAuthorizationMethod,
     tavilyApiKey: String,
-    installedSkillCount: Int,
-    mcpServerCount: Int,
     setupPreviewMode: Boolean = false,
     onFetchModels: (LlmProviderConfig, (List<String>) -> Unit) -> Unit,
     onStartProviderLogin: (String, String, ProviderAuthMethod, String) -> Unit,
@@ -218,7 +212,6 @@ fun OnboardingScreen(
     onConfigureWithRoot: () -> Unit,
     onSaveAgentModeAuthorization: (Boolean, AgentModeAuthorizationMethod) -> Unit,
     onCompleteFollowUp: () -> Unit,
-    onExploreSettings: () -> Unit,
 ) {
 
     var currentStep by rememberSaveable(initialStep, replayMode) {
@@ -393,56 +386,8 @@ fun OnboardingScreen(
                     if (trimmed.isNotBlank()) {
                         onSaveTavilyApiKey(trimmed)
                     }
-                    currentStep = OnboardingStep.SkillsOverview
+                    onCompleteFollowUp()
                 },
-            )
-
-            OnboardingStep.SkillsOverview -> SummaryStep(
-                stepIndex = stepIndex,
-                stepCount = steps.size,
-                message = stringResource(R.string.onboarding_skills_message),
-                title = stringResource(R.string.onboarding_skills_title),
-                icon = Icons.Rounded.Extension,
-                accent = TourGold,
-                lineOne = if (installedSkillCount == 0) {
-                    stringResource(R.string.onboarding_skills_not_needed)
-                } else {
-                    stringResource(R.string.onboarding_skills_installed_count, installedSkillCount)
-                },
-                lineTwo = stringResource(R.string.onboarding_skills_line_two),
-                chips = listOf(stringResource(R.string.onboarding_skill_chip_prompts), stringResource(R.string.onboarding_skill_chip_checks), stringResource(R.string.onboarding_skill_chip_templates)),
-                primaryLabel = stringResource(R.string.common_continue),
-                onPrimary = { currentStep = OnboardingStep.McpOverview },
-                secondaryLabel = stringResource(R.string.common_back),
-                onSecondary = { currentStep = OnboardingStep.TavilySetup },
-                onClose = onClose,
-            )
-
-            OnboardingStep.McpOverview -> SummaryStep(
-                stepIndex = stepIndex,
-                stepCount = steps.size,
-                message = stringResource(R.string.onboarding_mcp_message),
-                title = stringResource(R.string.onboarding_mcp_title),
-                icon = Icons.Rounded.Cloud,
-                accent = TourBlue,
-                lineOne = if (mcpServerCount == 0) {
-                    stringResource(R.string.onboarding_mcp_later)
-                } else {
-                    stringResource(R.string.onboarding_mcp_available_count, mcpServerCount)
-                },
-                lineTwo = stringResource(R.string.onboarding_mcp_line_two),
-                chips = listOf(
-                    stringResource(R.string.onboarding_chip_docs),
-                    stringResource(R.string.onboarding_chip_search),
-                    stringResource(R.string.onboarding_chip_apis),
-                ),
-                primaryLabel = stringResource(R.string.common_done),
-                onPrimary = onCompleteFollowUp,
-                secondaryLabel = stringResource(R.string.onboarding_open_settings),
-                onSecondary = onExploreSettings,
-                tertiaryLabel = stringResource(R.string.common_back),
-                onTertiary = { currentStep = OnboardingStep.SkillsOverview },
-                onClose = onClose,
             )
         }
     }
@@ -1710,83 +1655,9 @@ private fun TavilyStep(
                 onValueChange = onValueChange,
             )
             PrimaryActionButton(
-                label = stringResource(R.string.common_continue),
+                label = stringResource(R.string.common_done),
                 onClick = onContinue,
             )
-        }
-    }
-}
-
-@Composable
-private fun SummaryStep(
-    stepIndex: Int,
-    stepCount: Int,
-    message: String,
-    title: String,
-    icon: ImageVector,
-    accent: Color,
-    lineOne: String,
-    lineTwo: String,
-    chips: List<String>,
-    primaryLabel: String,
-    onPrimary: () -> Unit,
-    secondaryLabel: String? = null,
-    onSecondary: (() -> Unit)? = null,
-    tertiaryLabel: String? = null,
-    onTertiary: (() -> Unit)? = null,
-    onClose: () -> Unit,
-) {
-
-    ConversationStepPage(
-        stepIndex = stepIndex,
-        stepCount = stepCount,
-        message = message,
-        onBack = onTertiary,
-        topRightLabel = stringResource(R.string.common_close),
-        onTopRight = onClose,
-    ) {
-        Column(
-            modifier = Modifier.fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(18.dp),
-        ) {
-            StepLead(
-                icon = icon,
-                accent = accent,
-                title = title,
-                body = lineOne,
-            )
-            Text(
-                text = lineTwo,
-                style = MaterialTheme.typography.bodyMedium,
-                color = TourTextSecondary,
-            )
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                chips.forEach { chip ->
-                    PassiveChip(label = chip)
-                }
-            }
-            PrimaryActionButton(
-                label = primaryLabel,
-                onClick = onPrimary,
-            )
-            if (secondaryLabel != null && onSecondary != null) {
-                SecondaryTextAction(
-                    label = secondaryLabel,
-                    onClick = onSecondary,
-                )
-            }
-            if (tertiaryLabel != null && onTertiary != null) {
-                SecondaryTextAction(
-                    label = tertiaryLabel,
-                    onClick = onTertiary,
-                    color = TourTextSecondary,
-                )
-            }
         }
     }
 }
@@ -2101,24 +1972,6 @@ private fun ModelOptionButton(
             modifier = Modifier.fillMaxWidth(),
             style = MaterialTheme.typography.bodyLarge,
             textAlign = TextAlign.Start,
-        )
-    }
-}
-
-@Composable
-private fun PassiveChip(
-    label: String,
-) {
-    Box(
-        modifier = Modifier
-            .clip(RoundedCornerShape(18.dp))
-            .background(TourSurface)
-            .padding(horizontal = 14.dp, vertical = 10.dp),
-    ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.labelLarge,
-            color = TourTextPrimary,
         )
     }
 }

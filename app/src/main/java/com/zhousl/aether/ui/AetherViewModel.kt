@@ -1313,19 +1313,6 @@ class AetherViewModel(
         }
     }
 
-    fun exploreSettingsFromOnboardingTour() {
-        _uiState.update { current ->
-            current.copy(
-                currentScreen = AppScreen.Settings,
-                isOnboardingReplay = false,
-                onboardingStep = OnboardingStep.Landing,
-                onboardingReturnScreen = AppScreen.Chat,
-                awaitingFollowUpTour = false,
-                showFollowUpTourCard = false,
-            )
-        }
-    }
-
     fun appendDraftAttachments(uris: List<Uri>) {
         if (uris.isEmpty()) return
 
